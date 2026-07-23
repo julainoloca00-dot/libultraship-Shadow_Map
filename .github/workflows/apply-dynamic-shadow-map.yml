@@ -4,22 +4,25 @@ on:
   push:
     branches:
       - agent/dynamic-shadow-map-pcf
+  pull_request:
+    branches:
+      - wind-waker-style-cel-shading
 
 permissions:
   contents: write
 
 concurrency:
-  group: dynamic-shadow-map-${{ github.ref }}
+  group: dynamic-shadow-map-${{ github.event.pull_request.head.ref || github.ref }}
   cancel-in-progress: false
 
 jobs:
   patch-build-commit:
-    if: ${{ !contains(github.event.head_commit.message, '[dynamic-shadow-map-applied]') }}
     runs-on: windows-latest
     steps:
-      - name: Checkout branch
+      - name: Checkout implementation branch
         uses: actions/checkout@v4
         with:
+          ref: agent/dynamic-shadow-map-pcf
           fetch-depth: 0
 
       - name: Apply source changes
