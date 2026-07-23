@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <vector>
 #include <cmath>
+#include <cfloat>
 
 #include <map>
 #include <unordered_map>

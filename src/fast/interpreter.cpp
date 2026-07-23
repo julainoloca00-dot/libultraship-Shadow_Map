@@ -2421,333 +2421,37 @@ static constexpr size_t kShadowAccumBudgetFloats = 8u * 1024u * 1024u;
 // grid would otherwise show along the silhouette.
 void Interpreter::FlushToonShadow() {
     const float coreAlpha = std::clamp(mToonShadowAlpha, 0.0f, 1.0f);
-    if (mShadowVerts.size() < 9 || coreAlpha <= 0.0f) {
+    if (mShadowVerts.size() < 9 || coreAlpha <= 0.0f || !mRdp->toon_shadow) {
         mShadowVerts.clear();
         return;
     }
 
-    // Eased size scale (0..1) the game pushes per object, so the shadow grows in / shrinks out instead of
-    // popping. At ~0 there's nothing to draw.
-    const float sizeScale = std::clamp(mRsp->toon_shadow_size, 0.0f, 1.0f);
-    if (sizeScale <= 0.01f) {
-        mShadowVerts.clear();
-        return;
-    }
+    // Keep the buffer bounded. The data is three floats per vertex and is consumed once per frame.
+    // Drop newest casters once the budget is full, matching the old volume accumulator's behavior.
+    const size_t available =
+        mShadowCasterAccum.size() < kShadowAccumBudgetFloats
+            ? kShadowAccumBudgetFloats - mShadowCasterAccum.size()
+            : 0;
+    const size_t copyFloats = std::min(mShadowVerts.size(), available - (available % 9));
+    if (copyFloats >= 9) {
+        mShadowCasterAccum.insert(mShadowCasterAccum.end(), mShadowVerts.begin(),
+                                  mShadowVerts.begin() + copyFloats);
 
-    // Frame budget: once the accumulated volumes exceed it, drop THIS object's shadow (the newest) and keep
-    // everything already built — one missing shadow, not a whole-frame blink of all of them.
-    size_t accumTotal = 0;
-    for (int b = 0; b < kShadowBands; b++) {
-        accumTotal += mShadowVolumeAccum[b].size();
-    }
-    if (accumTotal > kShadowAccumBudgetFloats) {
-        mShadowVerts.clear();
-        return;
-    }
-
-    const size_t floatCount = mShadowVerts.size();
-
-    // Feet level = the lowest captured vertex (the real rendered feet, not the unreliable collision floor); the
-    // XZ centroid is the point the footprint shrinks toward when sizeScale < 1.
-    float minY = 1e30f, sumX = 0.0f, sumZ = 0.0f;
-    size_t vertN = 0;
-    for (size_t i = 0; i + 3 <= floatCount; i += 3) {
-        sumX += mShadowVerts[i], minY = std::min(minY, mShadowVerts[i + 1]), sumZ += mShadowVerts[i + 2];
-        vertN++;
-    }
-    const float cenX = sumX / (float)vertN, cenZ = sumZ / (float)vertN;
-    // Feet level, optionally raised UP to the floor Y the game passed: a model whose geometry dips far below
-    // the floor (a signpost's buried post) would otherwise build the whole slab below ground and cast nothing.
-    // Clamp only ever LIFTS the feet (max), so an actor standing on/above the floor is unaffected.
-    float feetY = minY;
-    if (mRsp->toon_shadow_clamp_feet) {
-        feetY = std::max(minY, mRsp->toon_shadow_feet_clamp_y);
-    }
-    const float slabTop = feetY + mShadowSlabRise;                     // above the feet (uphill ground)
-    const float slabBottom = feetY - std::max(5.0f, mShadowSlabDepth); // below the feet (downhill / cliffs)
-
-    // Cast direction from the cel key light (toward-light dir snapshotted at arm time), elevation-remapped
-    // against world up so a low light still casts a short shadow (Length slider drives minElev).
-    float lx = mRsp->toon_shadow_dir[0], ly = mRsp->toon_shadow_dir[1], lz = mRsp->toon_shadow_dir[2];
-    const float llen = sqrtf((lx * lx) + (ly * ly) + (lz * lz));
-    float dirX, dirY, dirZ;
-    const float minElev = std::clamp(mToonShadowMinElevation, 0.05f, 0.99f);
-    if (llen < 0.001f) {
-        dirX = 0.0f, dirY = -1.0f, dirZ = 0.0f;
-    } else {
-        lx /= llen, ly /= llen, lz /= llen;
-        const float lUp = ly < 0.0f ? 0.0f : ly;
-        const float elev = minElev + ((1.0f - minElev) * lUp);
-        const float hLen = sqrtf((lx * lx) + (lz * lz));
-        if (hLen < 0.001f) {
-            dirX = 0.0f, dirY = -1.0f, dirZ = 0.0f;
-        } else {
-            const float hScale = sqrtf(std::max(0.0f, 1.0f - (elev * elev))) / hLen;
-            dirX = -hScale * lx, dirY = -elev, dirZ = -hScale * lz;
-        }
-    }
-    const float descend = -dirY;
-
-    auto projectXZ = [&](float vx, float vy, float vz, float& ox, float& oz) {
-        float t = (descend > 0.001f) ? ((vy - slabTop) / descend) : 0.0f;
-        if (t < 0.0f) {
-            t = 0.0f;
-        }
-        ox = vx + (dirX * t);
-        oz = vz + (dirZ * t);
-    };
-
-    // Append one outward-wound world-space triangle to a band's frame accumulator, tagged cap(0) / wall(1).
-    auto pushTri = [&](int band, const float* p0, const float* p1, const float* p2, float ccx, float ccy, float ccz,
-                       uint8_t kind) {
-        const float ux = p1[0] - p0[0], uy = p1[1] - p0[1], uz = p1[2] - p0[2];
-        const float vx = p2[0] - p0[0], vy = p2[1] - p0[1], vz = p2[2] - p0[2];
-        const float nX = (uy * vz) - (uz * vy), nY = (uz * vx) - (ux * vz), nZ = (ux * vy) - (uy * vx);
-        const float fx = ((p0[0] + p1[0] + p2[0]) / 3.0f) - ccx;
-        const float fy = ((p0[1] + p1[1] + p2[1]) / 3.0f) - ccy;
-        const float fz = ((p0[2] + p1[2] + p2[2]) / 3.0f) - ccz;
-        const bool outward = ((nX * fx) + (nY * fy) + (nZ * fz)) >= 0.0f;
-        const float* q1 = outward ? p1 : p2;
-        const float* q2 = outward ? p2 : p1;
-        std::vector<float>& acc = mShadowVolumeAccum[band];
-        acc.push_back(p0[0]), acc.push_back(p0[1]), acc.push_back(p0[2]);
-        acc.push_back(q1[0]), acc.push_back(q1[1]), acc.push_back(q1[2]);
-        acc.push_back(q2[0]), acc.push_back(q2[1]), acc.push_back(q2[2]);
-        if (mShadowShowVolume) { // cap/wall tag is only read by the debug overlay
-            mShadowVolumeKind[band].push_back(kind);
-        }
-    };
-
-    // Rasterize the projected triangles into an occupancy grid over the footprint bounds, then rebuild the
-    // volume as one box per horizontal run of occupied cells. Boxes never overlap and abutting boxes share
-    // exactly-coincident, oppositely-wound walls (identical float coordinates → identical rasterization), so
-    // their z-fail counts cancel and the union reads as one seamless footprint with stencil overlap 1.
-    auto shrink = [&](float& x, float& z) {
-        if (sizeScale < 1.0f) {
-            x = cenX + (x - cenX) * sizeScale;
-            z = cenZ + (z - cenZ) * sizeScale;
-        }
-    };
-    // Pass 1: bounds of the projected (shrunk) footprint.
-    float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
-    for (size_t i = 0; i + 3 <= floatCount; i += 3) {
-        float px, pz;
-        projectXZ(mShadowVerts[i], mShadowVerts[i + 1], mShadowVerts[i + 2], px, pz);
-        shrink(px, pz);
-        minX = std::min(minX, px), maxX = std::max(maxX, px);
-        minZ = std::min(minZ, pz), maxZ = std::max(maxZ, pz);
-    }
-    const float cellW = (maxX - minX) / kShadowGridSize;
-    const float cellH = (maxZ - minZ) / kShadowGridSize;
-    if (cellW < 1e-4f || cellH < 1e-4f) { // footprint degenerate (a line/point) — nothing worth casting
-        mShadowVerts.clear();
-        return;
-    }
-    // Pass 2: rasterize, conservatively. Mark each triangle's three vertex cells (so sub-cell triangles
-    // still register) plus every cell in its bounding box whose CENTRE lies within half a cell-diagonal
-    // of the triangle (signed edge distance ≥ −margin). The margin matters: a centre exactly on the
-    // crack between two adjacent triangles can be float-marginally outside BOTH, and an exact
-    // centre-in-triangle test then leaves a pinhole. The margin closes cracks by construction, at the
-    // cost of dilating the footprint by up to half a cell.
-    //
-    // Resolution: the 2× raster only exists to give each output cell a 0–4 sub-cell coverage count for
-    // the soft-edge bands. EdgeSoftness 0 (hard edge) needs no counts — any hit is core — so it
-    // rasterizes at the output resolution directly, a quarter of the cell tests.
-    const int softness = std::clamp(mShadowEdgeSoftness, 0, kShadowBands - 1);
-    const int rScale = (softness == 0) ? 1 : 2;
-    const int rSize = kShadowGridSize * rScale;
-    const float rCellW = cellW / (float)rScale, rCellH = cellH / (float)rScale;
-    const float margin = 0.5f * sqrtf((rCellW * rCellW) + (rCellH * rCellH));
-    auto rCellX = [&](float x) { return std::clamp((int)((x - minX) / rCellW), 0, rSize - 1); };
-    auto rCellZ = [&](float z) { return std::clamp((int)((z - minZ) / rCellH), 0, rSize - 1); };
-    uint64_t raster[kShadowRasterSize][kShadowRasterWords] = {}; // sized for 2×; hard edge uses a quarter
-    auto rasterSet = [&](int gz, int gx) { raster[gz][gx >> 6] |= 1ull << (gx & 63); };
-    for (size_t base = 0; base + 9 <= floatCount; base += 9) {
-        float ax, az, bx, bz, cx, cz;
-        projectXZ(mShadowVerts[base + 0], mShadowVerts[base + 1], mShadowVerts[base + 2], ax, az);
-        projectXZ(mShadowVerts[base + 3], mShadowVerts[base + 4], mShadowVerts[base + 5], bx, bz);
-        projectXZ(mShadowVerts[base + 6], mShadowVerts[base + 7], mShadowVerts[base + 8], cx, cz);
-        shrink(ax, az), shrink(bx, bz), shrink(cx, cz);
-        const int axi = rCellX(ax), azi = rCellZ(az);
-        const int bxi = rCellX(bx), bzi = rCellZ(bz);
-        const int cxi = rCellX(cx), czi = rCellZ(cz);
-        rasterSet(azi, axi);
-        rasterSet(bzi, bxi);
-        rasterSet(czi, cxi);
-        const float area2 = ((bx - ax) * (cz - az)) - ((cx - ax) * (bz - az));
-        if (fabsf(area2) < 1e-6f) {
-            continue; // sliver — the vertex sub-cells above are all it gets
-        }
-        // Signed edge distances need a consistent orientation and per-edge length scaling (the raw edge
-        // function is distance × edge length).
-        const float sgn = (area2 >= 0.0f) ? 1.0f : -1.0f;
-        const float len0 = sqrtf(((bx - ax) * (bx - ax)) + ((bz - az) * (bz - az)));
-        const float len1 = sqrtf(((cx - bx) * (cx - bx)) + ((cz - bz) * (cz - bz)));
-        const float len2 = sqrtf(((ax - cx) * (ax - cx)) + ((az - cz) * (az - cz)));
-        const float m0 = -margin * len0, m1 = -margin * len1, m2 = -margin * len2;
-        const int x0 = std::min({ axi, bxi, cxi }), x1 = std::max({ axi, bxi, cxi });
-        const int z0 = std::min({ azi, bzi, czi }), z1 = std::max({ azi, bzi, czi });
-        for (int gz = z0; gz <= z1; gz++) {
-            const float pz = minZ + ((gz + 0.5f) * rCellH);
-            for (int gx = x0; gx <= x1; gx++) {
-                const float px = minX + ((gx + 0.5f) * rCellW);
-                const float e0 = sgn * (((bx - ax) * (pz - az)) - ((bz - az) * (px - ax)));
-                const float e1 = sgn * (((cx - bx) * (pz - bz)) - ((cz - bz) * (px - bx)));
-                const float e2 = sgn * (((ax - cx) * (pz - cz)) - ((az - cz) * (px - cx)));
-                if (e0 >= m0 && e1 >= m1 && e2 >= m2) {
-                    rasterSet(gz, gx);
-                }
-            }
+        // A single optimized directional map uses the average dominant key of all accepted casters.
+        // Per-object point-light maps would require one map and resolve per actor and defeat the low-cost goal.
+        const float dx = mRsp->toon_shadow_dir[0];
+        const float dy = mRsp->toon_shadow_dir[1];
+        const float dz = mRsp->toon_shadow_dir[2];
+        const float len2 = dx * dx + dy * dy + dz * dz;
+        if (len2 > 1e-8f) {
+            const float invLen = 1.0f / sqrtf(len2);
+            mShadowLightDirAccum[0] += dx * invLen;
+            mShadowLightDirAccum[1] += dy * invLen;
+            mShadowLightDirAccum[2] += dz * invLen;
+            mShadowLightDirSamples++;
         }
     }
 
-    // Pass 3: downsample each output cell's 2×2 sub-cells to a coverage count (0–4) and assign disjoint
-    // opacity bands (band alphas step down in RenderShadowVolumes; nothing double-darkens):
-    //   EdgeSoftness 0: any coverage → full opacity (hard edge) — raster is already at output
-    //                   resolution, so its rows ARE the core band, no downsample.
-    //   EdgeSoftness 1: full coverage → core; partial coverage → half opacity. The partially-covered cells
-    //                   are exactly the silhouette's staircase, so this reads as an anti-aliased edge.
-    //   EdgeSoftness 2: full → core; 2–3 sub-cells → 2/3; 1 sub-cell → 1/3, plus a one-cell halo outside
-    //                   the footprint at 1/3 — a finer ramp and a slightly wider fringe.
-    uint64_t bandRows[kShadowBands][kShadowGridSize][kShadowGridWords] = {};
-    uint64_t occupied[kShadowGridSize][kShadowGridWords] = {};
-    if (rScale == 1) {
-        for (int gz = 0; gz < kShadowGridSize; gz++) {
-            for (int i = 0; i < kShadowGridWords; i++) {
-                occupied[gz][i] = raster[gz][i];
-                bandRows[0][gz][i] = raster[gz][i];
-            }
-        }
-    } else {
-        for (int gz = 0; gz < kShadowGridSize; gz++) {
-            const uint64_t* r0 = raster[gz * 2];
-            const uint64_t* r1 = raster[(gz * 2) + 1];
-            for (int gx = 0; gx < kShadowGridSize; gx++) {
-                const int sx = gx * 2;
-                const int cov = (int)((r0[sx >> 6] >> (sx & 63)) & 1ull) + (int)((r0[(sx + 1) >> 6] >> ((sx + 1) & 63)) & 1ull) +
-                                (int)((r1[sx >> 6] >> (sx & 63)) & 1ull) + (int)((r1[(sx + 1) >> 6] >> ((sx + 1) & 63)) & 1ull);
-                if (cov == 0) {
-                    continue;
-                }
-                occupied[gz][gx >> 6] |= 1ull << (gx & 63);
-                int band = 0;
-                if (softness == 1) {
-                    band = (cov == 4) ? 0 : 1;
-                } else if (softness >= 2) {
-                    band = (cov == 4) ? 0 : ((cov >= 2) ? 1 : 2);
-                }
-                bandRows[band][gz][gx >> 6] |= 1ull << (gx & 63);
-            }
-        }
-    }
-    if (softness >= 2) {
-        // Halo: one output cell outside the occupied footprint, at the lightest band.
-        static constexpr uint64_t kZeroRow[kShadowGridWords] = {};
-        for (int gz = 0; gz < kShadowGridSize; gz++) {
-            const uint64_t* cur = occupied[gz];
-            const uint64_t* up = (gz > 0) ? occupied[gz - 1] : kZeroRow;
-            const uint64_t* down = (gz + 1 < kShadowGridSize) ? occupied[gz + 1] : kZeroRow;
-            for (int i = 0; i < kShadowGridWords; i++) {
-                const uint64_t left = (cur[i] << 1) | ((i > 0) ? (cur[i - 1] >> 63) : 0);
-                const uint64_t right = (cur[i] >> 1) | ((i + 1 < kShadowGridWords) ? (cur[i + 1] << 63) : 0);
-                bandRows[2][gz][i] |= (cur[i] | left | right | up[i] | down[i]) & ~cur[i];
-            }
-        }
-    }
-
-    // Pass 4: one box (2 caps + 4 wall quads) per maximal RECTANGLE of occupied cells, per band. A
-    // rectangle is a maximal horizontal run repeated IDENTICALLY across consecutive rows. Identical-run
-    // merging preserves the invariant the x walls rely on (nothing in any merged row abuts the run's
-    // ends — an abutting cell would have made that row's maximal run differ, stopping the merge) while
-    // cutting the emitted triangles several-fold on typical blob footprints: a silhouette's edge slope
-    // is below one cell per row for most rows, so those rows carry identical runs and merge.
-    auto bandTest = [&](int band, int gz, int gx) -> bool {
-        return ((bandRows[band][gz][gx >> 6] >> (gx & 63)) & 1ull) != 0;
-    };
-    // Consumption tracker: a rectangle removes each claimed run WHOLE, so `rem` always holds a subset
-    // of the original maximal runs, intact — which is what makes the exact-run test below sound. The
-    // z-wall neighbour tests keep consulting bandRows (the full occupancy), not rem.
-    uint64_t rem[kShadowGridSize][kShadowGridWords];
-    for (int band = 0; band < kShadowBands; band++) {
-        memcpy(rem, bandRows[band], sizeof(rem));
-        auto remTest = [&](int gz, int gx) -> bool { return ((rem[gz][gx >> 6] >> (gx & 63)) & 1ull) != 0; };
-        auto remClearRun = [&](int gz, int x0, int x1) {
-            for (int gx = x0; gx < x1; gx++) {
-                rem[gz][gx >> 6] &= ~(1ull << (gx & 63));
-            }
-        };
-        // Does row gz still contain EXACTLY the maximal run [x0,x1)?
-        auto rowRunMatches = [&](int gz, int x0, int x1) -> bool {
-            if ((x0 > 0 && remTest(gz, x0 - 1)) || (x1 < kShadowGridSize && remTest(gz, x1))) {
-                return false; // longer run here — not identical
-            }
-            for (int gx = x0; gx < x1; gx++) {
-                if (!remTest(gz, gx)) {
-                    return false;
-                }
-            }
-            return true;
-        };
-        for (int gz = 0; gz < kShadowGridSize; gz++) {
-            int gx = 0;
-            while (gx < kShadowGridSize) {
-                if (!remTest(gz, gx)) {
-                    gx++;
-                    continue;
-                }
-                const int runStart = gx;
-                while (gx < kShadowGridSize && remTest(gz, gx)) {
-                    gx++;
-                }
-                remClearRun(gz, runStart, gx);
-                // Grow the rectangle downward while the run repeats exactly, consuming as it goes.
-                int zEnd = gz + 1;
-                while (zEnd < kShadowGridSize && rowRunMatches(zEnd, runStart, gx)) {
-                    remClearRun(zEnd, runStart, gx);
-                    zEnd++;
-                }
-                const float x0 = minX + (runStart * cellW), x1 = minX + (gx * cellW);
-                const float z0 = minZ + (gz * cellH), z1 = minZ + (zEnd * cellH);
-                const float ccx = (x0 + x1) * 0.5f, ccy = (slabTop + slabBottom) * 0.5f, ccz = (z0 + z1) * 0.5f;
-                auto quad = [&](const float* a, const float* b, const float* c, const float* d, uint8_t kind) {
-                    pushTri(band, a, b, c, ccx, ccy, ccz, kind), pushTri(band, a, c, d, ccx, ccy, ccz, kind);
-                };
-                const float t00[3] = { x0, slabTop, z0 }, t10[3] = { x1, slabTop, z0 };
-                const float t11[3] = { x1, slabTop, z1 }, t01[3] = { x0, slabTop, z1 };
-                const float b00[3] = { x0, slabBottom, z0 }, b10[3] = { x1, slabBottom, z0 };
-                const float b11[3] = { x1, slabBottom, z1 }, b01[3] = { x0, slabBottom, z1 };
-                quad(t00, t10, t11, t01, 0); // top cap
-                quad(b00, b10, b11, b01, 0); // bottom cap
-                quad(t01, t00, b00, b01, 1); // wall x0 (nothing abuts the run ends in any merged row)
-                quad(t10, t11, b11, b10, 1); // wall x1
-                // z walls at the rectangle's first/last row only: the segments where the neighbouring
-                // row's cell (in the SAME band) is unoccupied. Abutting geometry's coincident opposite
-                // walls would cancel in the final stencil count anyway, but they still pile up in the
-                // increment pass before the decrements land — emitting only outline segments keeps
-                // pass-1 peaks proportional to the region's OUTLINE crossings.
-                auto zWallSegments = [&](int neighborGz, float zw) {
-                    const bool haveNeighbor = (neighborGz >= 0) && (neighborGz < kShadowGridSize);
-                    int sx = runStart;
-                    while (sx < gx) {
-                        if (haveNeighbor && bandTest(band, neighborGz, sx)) {
-                            sx++;
-                            continue;
-                        }
-                        const int s0 = sx;
-                        while (sx < gx && !(haveNeighbor && bandTest(band, neighborGz, sx))) {
-                            sx++;
-                        }
-                        const float wx0 = minX + (s0 * cellW), wx1 = minX + (sx * cellW);
-                        const float ta[3] = { wx0, slabTop, zw }, tb[3] = { wx1, slabTop, zw };
-                        const float ba[3] = { wx0, slabBottom, zw }, bb[3] = { wx1, slabBottom, zw };
-                        quad(ta, tb, bb, ba, 1);
-                    }
-                };
-                zWallSegments(gz - 1, z0);
-                zWallSegments(zEnd, z1);
-            }
-        }
-    }
     mShadowVerts.clear();
 }
 
@@ -2757,247 +2461,35 @@ void Interpreter::FlushToonShadow() {
 // stepped-down alpha; the steps read as a small soft edge. Called once per frame at the pre-actor hook
 // (after the room is drawn) so the shadows fall only on the environment.
 void Interpreter::RenderShadowVolumes() {
-    const float coreAlpha = std::clamp(mToonShadowAlpha, 0.0f, 1.0f);
-    auto clearAccums = [this] {
-        for (int b = 0; b < kShadowBands; b++) {
-            mShadowVolumeAccum[b].clear();
-            mShadowVolumeKind[b].clear();
-        }
-    };
-    size_t accumTotal = 0;
-    for (int b = 0; b < kShadowBands; b++) {
-        accumTotal += mShadowVolumeAccum[b].size();
+    float lightDir[3] = { 0.30f, 1.0f, 0.20f };
+    if (mShadowLightDirSamples > 0) {
+        lightDir[0] = mShadowLightDirAccum[0] / (float)mShadowLightDirSamples;
+        lightDir[1] = mShadowLightDirAccum[1] / (float)mShadowLightDirSamples;
+        lightDir[2] = mShadowLightDirAccum[2] / (float)mShadowLightDirSamples;
     }
-    if (accumTotal < 9 || coreAlpha <= 0.0f) {
-        clearAccums();
-        return;
+    const float len2 = lightDir[0] * lightDir[0] + lightDir[1] * lightDir[1] + lightDir[2] * lightDir[2];
+    if (len2 > 1e-8f) {
+        const float invLen = 1.0f / sqrtf(len2);
+        lightDir[0] *= invLen;
+        lightDir[1] *= invLen;
+        lightDir[2] *= invLen;
     }
 
-    const uint64_t savedCombine = mRdp->combine_mode;
-    const uint32_t savedOtherL = mRdp->other_mode_l;
-    const uint32_t savedOtherH = mRdp->other_mode_h;
-    const uint32_t savedGeo = mRsp->geometry_mode;
-    const bool savedToon = mRdp->toon;
-    const bool savedToonShadow = mRdp->toon_shadow;
-    const bool savedGray = mRdp->grayscale;
-    const struct RGBA savedPrim = mRdp->prim_color;
+    const size_t vertexCount = mShadowCasterAccum.size() / 3;
+    mRapi->RenderDynamicShadowMap(vertexCount >= 3 ? mShadowCasterAccum.data() : nullptr, vertexCount,
+                                  &mRsp->P_matrix[0][0], lightDir, kDynamicShadowMapResolution,
+                                  std::clamp(mToonShadowAlpha, 0.0f, 1.0f), kDynamicShadowMapBias,
+                                  kDynamicShadowMapPcfRadius);
 
-    mRdp->toon = false;
-    mRdp->toon_shadow = false; // the volume geometry must not be re-captured
-    mRdp->grayscale = false;
-    mRdp->other_mode_h = (savedOtherH & ~(3U << G_MDSFT_CYCLETYPE)) | G_CYC_1CYCLE;
-    GfxDpSetCombineMode(color_comb(0, 0, 0, G_CCMUX_PRIMITIVE), alpha_comb(0, 0, 0, G_ACMUX_PRIMITIVE), 0, 0);
+    mShadowCasterAccum.clear();
+    mShadowLightDirAccum[0] = mShadowLightDirAccum[1] = mShadowLightDirAccum[2] = 0.0f;
+    mShadowLightDirSamples = 0;
 
-    const uint32_t cullFront = get_attr(CULL_FRONT);
-    const uint32_t cullBack = get_attr(CULL_BACK);
-    const uint32_t cullBoth = get_attr(CULL_BOTH);
-    const GfxClipParameters clip = mRapi->GetClipParameters();
-    // How many opacity steps the soft edge uses (EdgeSoftness rings + the core). Leftover ring geometry from
-    // a mid-frame softness change draws at the lightest step rather than being dropped.
-    const int bandsTotal = std::clamp(mShadowEdgeSoftness, 0, kShadowBands - 1) + 1;
-
-    // Copy triangle t's three cached verts into the scratch slots GfxSpTri1 reads.
-    auto loadTri = [&](size_t t) {
-        mRsp->loaded_vertices[MAX_VERTICES + 0] = mShadowXform[t * 3 + 0];
-        mRsp->loaded_vertices[MAX_VERTICES + 1] = mShadowXform[t * 3 + 1];
-        mRsp->loaded_vertices[MAX_VERTICES + 2] = mShadowXform[t * 3 + 2];
-    };
-    size_t triTotal = 0; // triangles of the band currently staged in mShadowXform
-
-    // SOH [Enhancement] Actor shadow: batched volume submission. The volume is thousands of identical-state
-    // triangles; routing each through GfxSpTri1 repays the full combiner/shader/mode resolution per triangle —
-    // the measured CPU bottleneck. Instead, resolve+load all render state ONCE per band (draw a single triangle
-    // through the normal path with culling off, then discard it — nothing is submitted because its state-change
-    // Flushes fire on an empty buffer and we zero the buffer afterward), learn the exact per-vertex VBO layout
-    // from what it wrote, and fill the vertex buffer directly for the rest. The z-fail pass is two-sided
-    // (no culling — the GPU's facing picks increment vs decrement per triangle), so the software cull
-    // below only fires for geometry modes that carry cull bits. The capture must rerun each band
-    // because the band's composite re-resolves the pipeline with its own state. mBufVbo is backend-agnostic,
-    // so this single interpreter-side change is correct on all three backends.
-    size_t shadowStride = 0;                           // floats per vertex (0 = layout unexpected -> fallback)
-    float shadowColorBlock[VBO_MAX_FLOATS_PER_VERTEX]; // constant non-position vertex data (the flat prim color)
-
-    auto appendShadowVert = [&](const LoadedVertex& v) {
-        float z = v.z;
-        if (clip.z_is_from_0_to_1) {
-            z = (z + v.w) / 2.0f;
-        }
-        mBufVbo[mBufVboLen++] = v.x;
-        mBufVbo[mBufVboLen++] = clip.invertY ? -v.y : v.y;
-        mBufVbo[mBufVboLen++] = z;
-        mBufVbo[mBufVboLen++] = v.w;
-        for (size_t f = 4; f < shadowStride; f++) {
-            mBufVbo[mBufVboLen++] = shadowColorBlock[f];
-        }
-    };
-    // Software backface cull, identical to GfxSpTri1's, so each pass keeps the same faces it did per-triangle.
-    auto faceCulled = [&](const LoadedVertex& v1, const LoadedVertex& v2, const LoadedVertex& v3) -> bool {
-        const uint32_t cullType = mRsp->geometry_mode & cullBoth;
-        if (cullType == 0) {
-            return false;
-        }
-        const float dx1 = (v1.x / v1.w) - (v2.x / v2.w), dy1 = (v1.y / v1.w) - (v2.y / v2.w);
-        const float dx2 = (v3.x / v3.w) - (v2.x / v2.w), dy2 = (v3.y / v3.w) - (v2.y / v2.w);
-        float cross = (dx1 * dy2) - (dy1 * dx2);
-        if ((v1.w < 0) ^ (v2.w < 0) ^ (v3.w < 0)) {
-            cross = -cross;
-        }
-        if (ucode_handler_index == UcodeHandlers::ucode_f3dex2 &&
-            (mRsp->extra_geometry_mode & G_EX_INVERT_CULLING) == 1) {
-            cross = -cross;
-        }
-        if (cullType == cullFront) {
-            return cross <= 0;
-        }
-        if (cullType == cullBack) {
-            return cross >= 0;
-        }
-        return true; // cull_both
-    };
-    // Fill + submit the whole volume for the current pass: fast direct-write path, or the per-triangle GfxSpTri1
-    // fallback if the captured layout was unexpected (shadowStride == 0).
-    auto drawVolume = [&]() {
-        if (shadowStride == 0) {
-            for (size_t t = 0; t < triTotal; t++) {
-                loadTri(t);
-                GfxSpTri1(MAX_VERTICES + 0, MAX_VERTICES + 1, MAX_VERTICES + 2, false);
-            }
-        } else {
-            for (size_t t = 0; t < triTotal; t++) {
-                const LoadedVertex& a = mShadowXform[t * 3 + 0];
-                const LoadedVertex& b = mShadowXform[t * 3 + 1];
-                const LoadedVertex& c = mShadowXform[t * 3 + 2];
-                if (faceCulled(a, b, c)) {
-                    continue;
-                }
-                appendShadowVert(a), appendShadowVert(b), appendShadowVert(c);
-                if (++mBufVboNumTris == MAX_TRI_BUFFER) {
-                    Flush();
-                }
-            }
-        }
-        Flush();
-    };
-
+    // Release any capacity retained by the legacy stencil-volume path after switching methods.
     for (int band = 0; band < kShadowBands; band++) {
-        const std::vector<float>& vol = mShadowVolumeAccum[band];
-        if (vol.size() < 9) {
-            continue;
-        }
-        // Band alpha: full-opacity core, one step lighter per ring.
-        const int step = std::min(band, bandsTotal - 1);
-        const uint8_t bandA =
-            (uint8_t)(coreAlpha * ((float)(bandsTotal - step) / (float)bandsTotal) * 255.0f);
-        if (bandA == 0) {
-            continue;
-        }
-
-        // Transform the band to clip space ONCE; the two stencil passes and the debug overlay reuse it
-        // instead of re-projecting every vertex per pass. Vertex color is left undefined: the combine outputs
-        // PRIMITIVE (set per pass via prim_color), so the per-vertex shade color is never used.
-        const size_t vertCount = vol.size() / 3;
-        mShadowXform.resize(vertCount);
-        for (size_t vi = 0; vi < vertCount; vi++) {
-            const float wx = vol[vi * 3 + 0], wy = vol[vi * 3 + 1], wz = vol[vi * 3 + 2];
-            LoadedVertex& d = mShadowXform[vi];
-            d.x = AdjXForAspectRatio((wx * mRsp->P_matrix[0][0]) + (wy * mRsp->P_matrix[1][0]) +
-                                     (wz * mRsp->P_matrix[2][0]) + mRsp->P_matrix[3][0]);
-            d.y = (wx * mRsp->P_matrix[0][1]) + (wy * mRsp->P_matrix[1][1]) + (wz * mRsp->P_matrix[2][1]) +
-                  mRsp->P_matrix[3][1];
-            d.z = (wx * mRsp->P_matrix[0][2]) + (wy * mRsp->P_matrix[1][2]) + (wz * mRsp->P_matrix[2][2]) +
-                  mRsp->P_matrix[3][2];
-            d.w = (wx * mRsp->P_matrix[0][3]) + (wy * mRsp->P_matrix[1][3]) + (wz * mRsp->P_matrix[2][3]) +
-                  mRsp->P_matrix[3][3];
-            d.u = d.v = 0;
-            d.clip_rej = 0;
-        }
-        triTotal = vertCount / 3;
-
-        // Shared mask render state (both z-fail passes): flat transparent black, depth-tested XLU. Then
-        // resolve it into the pipeline and learn the VBO layout via the discarded setup triangle (see the
-        // batched-submission note above) — required per band, since the previous band's composite re-resolved
-        // the pipeline with its own state.
-        mRdp->prim_color = { 0, 0, 0, 0 };
-        mRdp->other_mode_l = G_RM_AA_ZB_XLU_SURF | G_RM_AA_ZB_XLU_SURF2;
-        shadowStride = 0;
-        {
-            const uint32_t geoSaved = mRsp->geometry_mode;
-            mRsp->geometry_mode = G_ZBUFFER; // no cull -> GfxSpTri1 runs its full setup for this triangle
-            Flush();
-            loadTri(0);
-            GfxSpTri1(MAX_VERTICES + 0, MAX_VERTICES + 1, MAX_VERTICES + 2, false);
-            mRsp->geometry_mode = geoSaved;
-            const size_t stride = (mBufVboNumTris > 0) ? (mBufVboLen / 3) : 0;
-            if (stride > 4 && stride <= VBO_MAX_FLOATS_PER_VERTEX) {
-                for (size_t f = 4; f < stride; f++) {
-                    shadowColorBlock[f] = mBufVbo[f]; // vertex 0's data past the 4 position floats (x,y,z,w)
-                }
-                shadowStride = stride;
-            }
-            mBufVboLen = 0, mBufVboNumTris = 0; // discard the setup triangle (re-drawn, culled, in the passes)
-        }
-
-        // z-fail mask, ONE two-sided pass: the GPU's facing picks the op per triangle (wrap-increment
-        // one facing, wrap-decrement the other), so the volume is submitted once with culling off
-        // instead of as a cull-front/cull-back pass pair — half the iteration, VBO fill and draw
-        // calls. Wrap ops + the composite's nonzero test make primitive order and facing polarity
-        // irrelevant; only "opposite ops per facing" matters (see StencilMode::VolumeIncrDecr).
-        mRsp->geometry_mode = G_ZBUFFER;
-        Flush();
-        mRapi->SetStencilMode((int)StencilMode::VolumeIncrDecr);
-        drawVolume();
-
-        // composite (self-clearing); full-screen clip-space quad, no depth test.
-        mRdp->prim_color = { 0, 0, 0, bandA };
-        mRdp->other_mode_l = G_RM_AA_XLU_SURF | G_RM_AA_XLU_SURF2;
-        mRsp->geometry_mode = 0;
-        mRapi->SetStencilMode((int)StencilMode::Composite);
-        {
-            const float qx[4] = { -1.0f, 1.0f, 1.0f, -1.0f }, qy[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
-            for (int k = 0; k < 4; k++) {
-                LoadedVertex* d = &mRsp->loaded_vertices[MAX_VERTICES + k];
-                d->x = qx[k], d->y = qy[k], d->z = 0.0f, d->w = 1.0f;
-                d->u = d->v = 0;
-                d->color = mRdp->prim_color;
-                d->clip_rej = 0;
-            }
-            GfxSpTri1(MAX_VERTICES + 0, MAX_VERTICES + 1, MAX_VERTICES + 2, false);
-            GfxSpTri1(MAX_VERTICES + 0, MAX_VERTICES + 2, MAX_VERTICES + 3, false);
-        }
-        Flush();
-
-        // debug overlay: draw this band's volumes translucently (black caps, blue walls), no stencil/depth.
-        if (mShadowShowVolume) {
-            mRapi->SetStencilMode((int)StencilMode::Off);
-            mRsp->geometry_mode = cullBack;
-            mRdp->other_mode_l = G_RM_AA_XLU_SURF | G_RM_AA_XLU_SURF2;
-            const std::vector<uint8_t>& kinds = mShadowVolumeKind[band];
-            for (int batch = 0; batch < 2; batch++) {
-                mRdp->prim_color = (batch == 0) ? RGBA{ 0, 0, 0, 128 } : RGBA{ 40, 90, 255, 128 };
-                for (size_t t = 0; (t * 3) + 3 <= vertCount; t++) {
-                    const bool isCap = t < kinds.size() && kinds[t] == 0;
-                    if (isCap != (batch == 0)) {
-                        continue;
-                    }
-                    loadTri(t);
-                    GfxSpTri1(MAX_VERTICES + 0, MAX_VERTICES + 1, MAX_VERTICES + 2, false);
-                }
-                Flush();
-            }
-        }
+        mShadowVolumeAccum[band].clear();
+        mShadowVolumeKind[band].clear();
     }
-
-    mRapi->SetStencilMode((int)StencilMode::Off);
-    mRdp->prim_color = savedPrim;
-    mRdp->combine_mode = savedCombine;
-    mRdp->other_mode_l = savedOtherL;
-    mRdp->other_mode_h = savedOtherH;
-    mRsp->geometry_mode = savedGeo;
-    mRdp->toon = savedToon;
-    mRdp->toon_shadow = savedToonShadow;
-    mRdp->grayscale = savedGray;
-
-    clearAccums();
 }
 
 void Interpreter::GfxDpSetGrayscaleColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {

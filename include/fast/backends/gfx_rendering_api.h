@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <cstddef>
 
 #include <unordered_map>
 #include <set>
@@ -89,6 +90,16 @@ class GfxRenderingAPI {
     virtual void SetTextureFilter(FilteringMode mode) = 0;
     virtual FilteringMode GetTextureFilter() = 0;
     virtual void SetSrgbMode() = 0;
+
+    // SOH [Enhancement] Optimized dynamic shadow mapping. The interpreter supplies the previous
+    // frame's camera-visible caster triangles in world space. Backends that do not implement this
+    // hook retain the existing shadow path; DX11 renders a low-resolution depth map and resolves it
+    // over the scene with PCF.
+    virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
+                                        const float* cameraWorldToClip, const float lightDir[3],
+                                        uint32_t resolution, float opacity, float bias, int pcfRadius) {
+    }
+
     virtual ImTextureID GetTextureById(int id) = 0;
 
     // SOH [Enhancement] Toon lighting: the interpreter pushes the per-object dominant light here

@@ -565,6 +565,17 @@ class Interpreter {
     // SOH [Enhancement] Actor shadow: world-space positions of the current object's triangles (9 floats
     // per tri), accumulated as the object draws and drained by FlushToonShadow at each object boundary.
     std::vector<float> mShadowVerts;
+    // SOH [Enhancement] Dynamic shadow map: raw world-space caster triangles captured during the
+    // current actor pass and consumed at the next frame's environment/actor boundary. This preserves
+    // the existing one-frame deferred behavior while eliminating CPU footprint rasterization and
+    // stencil-volume generation.
+    std::vector<float> mShadowCasterAccum;
+    float mShadowLightDirAccum[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t mShadowLightDirSamples = 0;
+    static constexpr uint32_t kDynamicShadowMapResolution = 512;
+    static constexpr float kDynamicShadowMapBias = 0.0015f;
+    static constexpr int kDynamicShadowMapPcfRadius = 1; // 3x3 Percentage-Closer Filtering
+
     // SOH [Enhancement] Actor shadow: opacity bands the soft edge is built from. Band 0 is the full-opacity
     // core; higher bands are the one-cell penumbra rings around the silhouette, composited at stepped-down
     // alpha. Hard edge (EdgeSoftness 0) uses band 0 only.
