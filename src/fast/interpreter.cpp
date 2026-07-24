@@ -1305,6 +1305,16 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
             world_pos[2] = v->ob[0] * mtx[0][2] + v->ob[1] * mtx[1][2] + v->ob[2] * mtx[2][2] + mtx[3][2];
         }
 
+        if (mCaptureEnvironmentShadow) {
+            float(*shadowMv)[4] = mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1];
+            d->wx = v->ob[0] * shadowMv[0][0] + v->ob[1] * shadowMv[1][0] + v->ob[2] * shadowMv[2][0] +
+                    shadowMv[3][0];
+            d->wy = v->ob[0] * shadowMv[0][1] + v->ob[1] * shadowMv[1][1] + v->ob[2] * shadowMv[2][1] +
+                    shadowMv[3][1];
+            d->wz = v->ob[0] * shadowMv[0][2] + v->ob[1] * shadowMv[1][2] + v->ob[2] * shadowMv[2][2] +
+                    shadowMv[3][2];
+        }
+
         x = AdjXForAspectRatio(x);
 
         short U = v->tc[0] * mRsp->texture_scaling_factor.s >> 16;
@@ -1631,6 +1641,19 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
             texture_edge = false;
         }
         use_alpha = true;
+    }
+
+    const uint32_t cycleType = mRdp->other_mode_h & (3U << G_MDSFT_CYCLETYPE);
+    const bool opaqueEnvironmentCaster =
+        mCaptureEnvironmentShadow && !mFbActive && !is_rect && depth_test && depth_mask && !use_alpha &&
+        !texture_edge && !alpha_threshold && !invisible && cycleType != G_CYC_COPY && cycleType != G_CYC_FILL;
+    if (opaqueEnvironmentCaster &&
+        mEnvironmentShadowCasterAccum.size() + 9 <= kEnvironmentShadowBudgetFloats) {
+        for (int si = 0; si < 3; si++) {
+            mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wx);
+            mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wy);
+            mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wz);
+        }
     }
 
     if (use_alpha) {
@@ -2437,19 +2460,6 @@ void Interpreter::FlushToonShadow() {
         mShadowCasterAccum.insert(mShadowCasterAccum.end(), mShadowVerts.begin(),
                                   mShadowVerts.begin() + copyFloats);
 
-        // A single optimized directional map uses the average dominant key of all accepted casters.
-        // Per-object point-light maps would require one map and resolve per actor and defeat the low-cost goal.
-        const float dx = mRsp->toon_shadow_dir[0];
-        const float dy = mRsp->toon_shadow_dir[1];
-        const float dz = mRsp->toon_shadow_dir[2];
-        const float len2 = dx * dx + dy * dy + dz * dz;
-        if (len2 > 1e-8f) {
-            const float invLen = 1.0f / sqrtf(len2);
-            mShadowLightDirAccum[0] += dx * invLen;
-            mShadowLightDirAccum[1] += dy * invLen;
-            mShadowLightDirAccum[2] += dz * invLen;
-            mShadowLightDirSamples++;
-        }
     }
 
     mShadowVerts.clear();
@@ -2461,31 +2471,42 @@ void Interpreter::FlushToonShadow() {
 // stepped-down alpha; the steps read as a small soft edge. Called once per frame at the pre-actor hook
 // (after the room is drawn) so the shadows fall only on the environment.
 void Interpreter::RenderShadowVolumes() {
-    float lightDir[3] = { 0.30f, 1.0f, 0.20f };
-    if (mShadowLightDirSamples > 0) {
-        lightDir[0] = mShadowLightDirAccum[0] / (float)mShadowLightDirSamples;
-        lightDir[1] = mShadowLightDirAccum[1] / (float)mShadowLightDirSamples;
-        lightDir[2] = mShadowLightDirAccum[2] / (float)mShadowLightDirSamples;
-    }
-    const float len2 = lightDir[0] * lightDir[0] + lightDir[1] * lightDir[1] + lightDir[2] * lightDir[2];
-    if (len2 > 1e-8f) {
-        const float invLen = 1.0f / sqrtf(len2);
-        lightDir[0] *= invLen;
-        lightDir[1] *= invLen;
-        lightDir[2] *= invLen;
+    // This command is emitted after the opaque room and before normal actors. Stop room capture here,
+    // then combine this frame's visible environment with the previous frame's accepted actor casters.
+    mCaptureEnvironmentShadow = false;
+
+    const size_t available =
+        mEnvironmentShadowCasterAccum.size() < kShadowAccumBudgetFloats
+            ? kShadowAccumBudgetFloats - mEnvironmentShadowCasterAccum.size()
+            : 0;
+    const size_t copyFloats = std::min(mShadowCasterAccum.size(), available - (available % 9));
+    if (copyFloats >= 9) {
+        mEnvironmentShadowCasterAccum.insert(mEnvironmentShadowCasterAccum.end(), mShadowCasterAccum.begin(),
+                                             mShadowCasterAccum.begin() + copyFloats);
     }
 
-    const size_t vertexCount = mShadowCasterAccum.size() / 3;
-    mRapi->RenderDynamicShadowMap(vertexCount >= 3 ? mShadowCasterAccum.data() : nullptr, vertexCount,
-                                  &mRsp->P_matrix[0][0], lightDir, kDynamicShadowMapResolution,
-                                  std::clamp(mToonShadowAlpha, 0.0f, 1.0f), kDynamicShadowMapBias,
-                                  kDynamicShadowMapPcfRadius);
+    // Fast3D applies its widescreen correction to clip X after P_matrix. Pass the exact effective
+    // matrix to the backend so reconstruction from the DX11 depth buffer cannot swim with camera rotation.
+    float effectiveCamera[16];
+    memcpy(effectiveCamera, &mRsp->P_matrix[0][0], sizeof(effectiveCamera));
+    if (!mFbActive && mCurDimensions.width > 0 && mCurDimensions.height > 0) {
+        const float targetAspect = static_cast<float>(mCurDimensions.width) /
+                                   static_cast<float>(mCurDimensions.height);
+        const float aspectScale = (4.0f / 3.0f) / targetAspect;
+        for (int row = 0; row < 4; row++) {
+            effectiveCamera[row * 4] *= aspectScale;
+        }
+    }
 
+    const size_t vertexCount = mEnvironmentShadowCasterAccum.size() / 3;
+    mRapi->RenderDynamicShadowMap(vertexCount >= 3 ? mEnvironmentShadowCasterAccum.data() : nullptr, vertexCount,
+                                  effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor,
+                                  kDynamicShadowMapResolution, std::clamp(mToonShadowAlpha, 0.0f, 1.0f),
+                                  kDynamicShadowMapBias, kDynamicShadowMapPcfRadius);
+
+    mEnvironmentShadowCasterAccum.clear();
     mShadowCasterAccum.clear();
-    mShadowLightDirAccum[0] = mShadowLightDirAccum[1] = mShadowLightDirAccum[2] = 0.0f;
-    mShadowLightDirSamples = 0;
 
-    // Release any capacity retained by the legacy stencil-volume path after switching methods.
     for (int band = 0; band < kShadowBands; band++) {
         mShadowVolumeAccum[band].clear();
         mShadowVolumeKind[band].clear();
@@ -4653,6 +4674,9 @@ bool Interpreter::ViewportMatchesRendererResolution() {
 }
 
 void Interpreter::StartFrame() {
+    mCaptureEnvironmentShadow = mDynamicShadowsEnabled;
+    mEnvironmentShadowCasterAccum.clear();
+
     mWapi->GetDimensions(&mGfxCurrentWindowDimensions.width, &mGfxCurrentWindowDimensions.height, &mCurWindowPosX,
                          &mCurWindowPosY);
     if (mCurDimensions.height == 0) {

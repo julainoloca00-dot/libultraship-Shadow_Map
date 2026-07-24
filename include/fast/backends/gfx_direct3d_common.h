@@ -135,8 +135,8 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     FilteringMode GetTextureFilter() override;
     void SetSrgbMode() override;
     void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                const float* cameraWorldToClip, const float lightDir[3],
-                                uint32_t resolution, float opacity, float bias, int pcfRadius) override;
+                                const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],
+                                        uint32_t resolution, float opacity, float bias, int pcfRadius) override;
     ImTextureID GetTextureById(int id) override;
 
     PFN_D3D11_CREATE_DEVICE mDX11CreateDevice;

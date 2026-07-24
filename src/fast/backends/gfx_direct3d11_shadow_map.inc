@@ -338,11 +338,11 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 }
 
 void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                                  const float* cameraWorldToClip, const float lightDirection[3],
+                                                  const float* cameraWorldToClip, const float lightDirection[3], const float shadowAnchor[3],
                                                   uint32_t resolution, float opacity, float bias, int pcfRadius) {
     FramebufferDX11& framebuffer = mFrameBuffers[mCurrentFramebuffer];
     if (worldVertices == nullptr || vertexCount < 3 || opacity <= 0.0f || cameraWorldToClip == nullptr ||
-        framebuffer.depth_stencil_srv == nullptr) {
+        shadowAnchor == nullptr || framebuffer.depth_stencil_srv == nullptr) {
         return;
     }
 
@@ -370,37 +370,20 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     CrossShadowVec(forward, right, up);
     NormalizeShadowVec(up);
 
-    float minX = FLT_MAX;
-    float minY = FLT_MAX;
-    float minZ = FLT_MAX;
-    float maxX = -FLT_MAX;
-    float maxY = -FLT_MAX;
-    float maxZ = -FLT_MAX;
-    for (size_t i = 0; i < vertexCount; i++) {
-        const float p[3] = { worldVertices[i * 3], worldVertices[i * 3 + 1], worldVertices[i * 3 + 2] };
-        const float lx = DotShadowVec(p, right);
-        const float ly = DotShadowVec(p, up);
-        const float lz = DotShadowVec(p, forward);
-        minX = std::min(minX, lx);
-        minY = std::min(minY, ly);
-        minZ = std::min(minZ, lz);
-        maxX = std::max(maxX, lx);
-        maxY = std::max(maxY, ly);
-        maxZ = std::max(maxZ, lz);
-    }
-
-    float centerX = (minX + maxX) * 0.5f;
-    float centerY = (minY + maxY) * 0.5f;
-    const float halfX = std::max(256.0f, (maxX - minX) * 0.5f + 64.0f);
-    const float halfY = std::max(256.0f, (maxY - minY) * 0.5f + 64.0f);
+    static constexpr float kShadowWorldHalfExtent = 2048.0f;
+    static constexpr float kShadowWorldDepthHalfExtent = 4096.0f;
+    const float halfX = kShadowWorldHalfExtent;
+    const float halfY = kShadowWorldHalfExtent;
     const float texelX = (halfX * 2.0f) / static_cast<float>(mDynamicShadowResolution);
     const float texelY = (halfY * 2.0f) / static_cast<float>(mDynamicShadowResolution);
-    centerX = floorf(centerX / texelX + 0.5f) * texelX;
-    centerY = floorf(centerY / texelY + 0.5f) * texelY;
 
-    minZ -= 256.0f;
-    maxZ += 512.0f;
-    const float depthRange = std::max(1.0f, maxZ - minZ);
+    const float anchorCenterX = DotShadowVec(shadowAnchor, right);
+    const float anchorCenterY = DotShadowVec(shadowAnchor, up);
+    const float centerX = floorf(anchorCenterX / texelX + 0.5f) * texelX;
+    const float centerY = floorf(anchorCenterY / texelY + 0.5f) * texelY;
+    const float anchorCenterZ = DotShadowVec(shadowAnchor, forward);
+    const float minZ = anchorCenterZ - kShadowWorldDepthHalfExtent;
+    const float depthRange = kShadowWorldDepthHalfExtent * 2.0f;
 
     float lightViewProj[16] = {};
     lightViewProj[0] = right[0] / halfX;

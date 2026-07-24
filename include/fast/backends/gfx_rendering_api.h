@@ -96,7 +96,7 @@ class GfxRenderingAPI {
     // hook retain the existing shadow path; DX11 renders a low-resolution depth map and resolves it
     // over the scene with PCF.
     virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                        const float* cameraWorldToClip, const float lightDir[3],
+                                        const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],
                                         uint32_t resolution, float opacity, float bias, int pcfRadius) {
     }
 
