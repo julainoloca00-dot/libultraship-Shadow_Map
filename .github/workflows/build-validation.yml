@@ -20,14 +20,15 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path: str, old: str, new: str) -> None:
+          def sub_once(path: str, pattern: str, replacement: str, flags=re.S) -> None:
               file = Path(path)
               text = file.read_text(encoding="utf-8")
-              count = text.count(old)
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
               if count != 1:
-                  raise RuntimeError(f"{path}: expected one match, found {count}: {old!r}")
-              file.write_text(text.replace(old, new, 1), encoding="utf-8")
+                  raise RuntimeError(f"{path}: pattern matched {count} times: {pattern}")
+              file.write_text(updated, encoding="utf-8")
 
           def replace_all(path: str, old: str, new: str, expected: int) -> None:
               file = Path(path)
@@ -37,79 +38,48 @@ jobs:
                   raise RuntimeError(f"{path}: expected {expected} matches, found {count}: {old!r}")
               file.write_text(text.replace(old, new), encoding="utf-8")
 
-          replace_once(
+          sub_once(
               "include/fast/backends/gfx_direct3d_common.h",
-              "    // x = opacity, y = receiver bias, z = inverse map resolution, w = PCF radius\n"
-              "    float params[4];\n"
-              "};",
-              "    // x = opacity, y = receiver bias, z = inverse map resolution, w = PCF radius\n"
-              "    float params[4];\n"
-              "    // xyz = local point-light position, w = fill radius. Navi uses this to lift directional shadows.\n"
-              "    float localLight[4];\n"
-              "};"
+              r"(struct DynamicShadowCB\s*\{.*?float params\[4\];)(\s*\};)",
+              r"\1\n    // xyz = local point-light position, w = fill radius. Navi lifts directional shadows locally.\n    float localLight[4];\2"
           )
-          replace_once(
+          sub_once(
               "include/fast/backends/gfx_direct3d_common.h",
-              "    void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],\n"
-              "                                        uint32_t resolution, float opacity, float bias, int pcfRadius) override;",
-              "    void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
+              r"void RenderDynamicShadowMap\(const float\* worldVertices, size_t vertexCount,\s*const float\* cameraWorldToClip,\s*const float lightDir\[3\],\s*const float shadowAnchor\[3\],\s*uint32_t resolution, float opacity, float bias, int pcfRadius\) override;",
+              "void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
               "                                const float* cameraWorldToClip, const float lightDir[3],\n"
               "                                const float shadowAnchor[3], const float localLight[4], uint32_t resolution,\n"
               "                                float opacity, float bias, int pcfRadius) override;"
           )
-          replace_once(
+          sub_once(
               "include/fast/backends/gfx_rendering_api.h",
-              "    virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                         const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],\n"
-              "                                         uint32_t resolution, float opacity, float bias, int pcfRadius) {",
-              "    virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
+              r"virtual void RenderDynamicShadowMap\(const float\* worldVertices, size_t vertexCount,\s*const float\* cameraWorldToClip,\s*const float lightDir\[3\],\s*const float shadowAnchor\[3\],\s*uint32_t resolution, float opacity, float bias, int pcfRadius\)\s*\{",
+              "virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
               "                                        const float* cameraWorldToClip, const float lightDir[3],\n"
-              "                                        const float shadowAnchor[3], const float localLight[4], uint32_t resolution,\n"
-              "                                        float opacity, float bias, int pcfRadius) {"
+              "                                        const float shadowAnchor[3], const float localLight[4],\n"
+              "                                        uint32_t resolution, float opacity, float bias, int pcfRadius) {"
           )
 
-          replace_once(
+          sub_once(
               "include/fast/interpreter.h",
-              "    void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3]) {",
-              "    void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3],\n"
+              r"void SetDynamicShadowCaptureState\(bool enabled, const float lightDir\[3\], const float anchor\[3\]\)\s*\{",
+              "void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3],\n"
               "                                      const float localLight[4]) {"
           )
-          replace_once(
+          sub_once(
               "include/fast/interpreter.h",
-              "        if (!enabled) {\n"
-              "            mCaptureEnvironmentShadow = false;",
-              "        if (localLight != nullptr) {\n"
-              "            mDynamicShadowLocalLight[0] = localLight[0];\n"
-              "            mDynamicShadowLocalLight[1] = localLight[1];\n"
-              "            mDynamicShadowLocalLight[2] = localLight[2];\n"
-              "            mDynamicShadowLocalLight[3] = localLight[3] > 0.0f ? localLight[3] : 0.0f;\n"
-              "        } else {\n"
-              "            mDynamicShadowLocalLight[3] = 0.0f;\n"
-              "        }\n"
-              "        if (!enabled) {\n"
-              "            mCaptureEnvironmentShadow = false;"
+              r"(if \(anchor != nullptr\) \{.*?mDynamicShadowAnchor\[2\] = anchor\[2\];\s*\})\s*(if \(!enabled\) \{)",
+              r"\1\n        if (localLight != nullptr) {\n            mDynamicShadowLocalLight[0] = localLight[0];\n            mDynamicShadowLocalLight[1] = localLight[1];\n            mDynamicShadowLocalLight[2] = localLight[2];\n            mDynamicShadowLocalLight[3] = localLight[3] > 0.0f ? localLight[3] : 0.0f;\n        } else {\n            mDynamicShadowLocalLight[3] = 0.0f;\n        }\n        \2"
           )
-          replace_once(
+          sub_once(
               "include/fast/interpreter.h",
-              "            mDynamicShadowPendingFrames = 0;\n"
-              "        }\n"
-              "    }\n"
-              "    void StartFrame();",
-              "            mDynamicShadowPendingFrames = 0;\n"
-              "            mDynamicShadowLocalLight[3] = 0.0f;\n"
-              "        }\n"
-              "    }\n"
-              "    void StartFrame();"
+              r"(mDynamicShadowPendingFrames = 0;\s*)(\}\s*\}\s*void StartFrame\(\);)",
+              r"\1            mDynamicShadowLocalLight[3] = 0.0f;\n        \2"
           )
-          replace_once(
+          sub_once(
               "include/fast/interpreter.h",
-              "    float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };\n"
-              "    static constexpr size_t kEnvironmentShadowBudgetFloats = 2u * 1024u * 1024u;\n"
-              "    static constexpr float kEnvironmentShadowCaptureRadiusSq = 2304.0f * 2304.0f;\n"
-              "    static constexpr uint32_t kDynamicShadowMapResolution = 1024;\n"
-              "    static constexpr float kDynamicShadowMapBias = 0.0012f;",
-              "    float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };\n"
+              r"float mDynamicShadowAnchor\[3\] = \{ 0\.0f, 0\.0f, 0\.0f \};\s*static constexpr size_t kEnvironmentShadowBudgetFloats = 2u \* 1024u \* 1024u;\s*static constexpr float kEnvironmentShadowCaptureRadiusSq = 2304\.0f \* 2304\.0f;\s*static constexpr uint32_t kDynamicShadowMapResolution = 1024;\s*static constexpr float kDynamicShadowMapBias = 0\.0012f;",
+              "float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };\n"
               "    float mDynamicShadowLocalLight[4] = { 0.0f, 0.0f, 0.0f, 0.0f };\n"
               "    static constexpr size_t kEnvironmentShadowBudgetFloats = 8u * 1024u * 1024u;\n"
               "    static constexpr float kEnvironmentShadowCaptureRadiusSq = 1536.0f * 1536.0f;\n"
@@ -117,13 +87,11 @@ jobs:
               "    static constexpr float kDynamicShadowMapBias = 0.0008f;"
           )
 
-          replace_once(
+          sub_once(
               "src/fast/interpreter.cpp",
-              "                                  effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor,\n"
-              "                                  kDynamicShadowMapResolution, std::clamp(mToonShadowAlpha, 0.0f, 1.0f),",
-              "                                  effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor,\n"
-              "                                  mDynamicShadowLocalLight, kDynamicShadowMapResolution,\n"
-              "                                  std::clamp(mToonShadowAlpha, 0.0f, 1.0f),"
+              r"effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor,\s*kDynamicShadowMapResolution, std::clamp\(mToonShadowAlpha, 0\.0f, 1\.0f\),",
+              "effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor, mDynamicShadowLocalLight,\n"
+              "                                  kDynamicShadowMapResolution, std::clamp(mToonShadowAlpha, 0.0f, 1.0f),"
           )
 
           cbuffer_old = (
@@ -163,44 +131,31 @@ jobs:
           )
           replace_all("src/fast/backends/gfx_direct3d11_shadow_map.inc", alpha_old, alpha_new, 2)
 
-          replace_once(
+          sub_once(
               "src/fast/backends/gfx_direct3d11_shadow_map.inc",
+              r"void GfxRenderingAPIDX11::RenderDynamicShadowMap\(const float\* worldVertices, size_t vertexCount,\s*const float\* cameraWorldToClip, const float lightDirection\[3\],\s*const float shadowAnchor\[3\], uint32_t resolution, float opacity,\s*float bias, int pcfRadius\) \{",
               "void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                                  const float* cameraWorldToClip, const float lightDirection[3],\n"
-              "                                                  const float shadowAnchor[3], uint32_t resolution, float opacity,\n"
-              "                                                  float bias, int pcfRadius) {",
-              "void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                                  const float* cameraWorldToClip, const float lightDirection[3],\n"
-              "                                                  const float shadowAnchor[3], const float localLight[4],\n"
-              "                                                  uint32_t resolution, float opacity, float bias, int pcfRadius) {"
+              "                                                  const float* cameraWorldToClip,\n"
+              "                                                  const float lightDirection[3], const float shadowAnchor[3],\n"
+              "                                                  const float localLight[4], uint32_t resolution, float opacity,\n"
+              "                                                  float bias, int pcfRadius) {"
           )
-          replace_once(
+          sub_once(
               "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              "    // 1024x1024 over a tighter player-centred footprint gives ~3 world units per texel instead of 8.\n"
-              "    // The depth range still covers tall rooms while improving precision for walls and actor silhouettes.\n"
-              "    static constexpr float kShadowWorldHalfExtent = 1536.0f;",
-              "    // Ultra-quality near cascade: 4096 texels over 2048 world units gives 0.5 world units per texel.\n"
+              r"// 1024x1024 over a tighter player-centred footprint gives ~3 world units per texel instead of 8\.\s*// The depth range still covers tall rooms while improving precision for walls and actor silhouettes\.\s*static constexpr float kShadowWorldHalfExtent = 1536\.0f;",
+              "// Ultra-quality near cascade: 4096 texels over 2048 world units gives 0.5 world units per texel.\n"
               "    // This intentionally prioritizes a Breath-of-the-Wild-like crisp silhouette over GPU cost.\n"
               "    static constexpr float kShadowWorldHalfExtent = 1024.0f;"
           )
-          replace_once(
+          sub_once(
               "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              "        rasterDesc.DepthBias = 80;\n"
-              "        rasterDesc.SlopeScaledDepthBias = 1.5f;",
-              "        rasterDesc.DepthBias = 48;\n"
-              "        rasterDesc.SlopeScaledDepthBias = 1.0f;"
+              r"rasterDesc\.DepthBias = 80;\s*rasterDesc\.SlopeScaledDepthBias = 1\.5f;",
+              "rasterDesc.DepthBias = 48;\n        rasterDesc.SlopeScaledDepthBias = 1.0f;"
           )
-          replace_once(
+          sub_once(
               "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              "    mDynamicShadowCbData.params[3] = static_cast<float>(std::clamp(pcfRadius, 0, 2));\n\n"
-              "    D3D11_MAPPED_SUBRESOURCE mapped = {};",
-              "    mDynamicShadowCbData.params[3] = static_cast<float>(std::clamp(pcfRadius, 0, 2));\n"
-              "    if (localLight != nullptr) {\n"
-              "        memcpy(mDynamicShadowCbData.localLight, localLight, sizeof(mDynamicShadowCbData.localLight));\n"
-              "    } else {\n"
-              "        memset(mDynamicShadowCbData.localLight, 0, sizeof(mDynamicShadowCbData.localLight));\n"
-              "    }\n\n"
-              "    D3D11_MAPPED_SUBRESOURCE mapped = {};"
+              r"(mDynamicShadowCbData\.params\[3\] = static_cast<float>\(std::clamp\(pcfRadius, 0, 2\)\);)\s*(D3D11_MAPPED_SUBRESOURCE mapped = \{\};)",
+              r"\1\n    if (localLight != nullptr) {\n        memcpy(mDynamicShadowCbData.localLight, localLight, sizeof(mDynamicShadowCbData.localLight));\n    } else {\n        memset(mDynamicShadowCbData.localLight, 0, sizeof(mDynamicShadowCbData.localLight));\n    }\n\n    \2"
           )
           PY
 
