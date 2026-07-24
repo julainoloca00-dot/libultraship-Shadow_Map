@@ -1530,7 +1530,7 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     // at the object boundary. is_rect screen-space quads (UI) have no world position, so skip them. The
     // replayed shadow geometry itself runs with toon_shadow cleared, so it is never re-captured. NOTE: this
     // is gated on toon_shadow only (NOT mRdp->toon), so shadows work even when the cel relight is disabled.
-    if (mRdp->toon_shadow && !is_rect && (mRsp->geometry_mode & G_LIGHTING)) {
+    if (mRdp->toon_shadow && !is_rect) {
         for (int si = 0; si < 3; si++) {
             mShadowVerts.push_back(v_arr[si]->wx);
             mShadowVerts.push_back(v_arr[si]->wy);
