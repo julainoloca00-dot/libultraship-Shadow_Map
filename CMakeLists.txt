@@ -63,5 +63,25 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     include(cmake/ios-toolchain-populate.cmake)
 endif()
 
+# Temporary validation harness: patch the single foliage-capture condition inside the
+# runner workspace, compile that exact source, and include a text copy in the Windows
+# artifact. The generated copy is later committed to the cel-shading branch; this file
+# itself is never merged.
+if(DEFINED ENV{GITHUB_ACTIONS})
+    set(_shadow_source_path "${CMAKE_CURRENT_SOURCE_DIR}/src/fast/interpreter.cpp")
+    file(READ "${_shadow_source_path}" _shadow_source_original)
+    string(REPLACE
+        "if (mRdp->toon_shadow && !is_rect && (mRsp->geometry_mode & G_LIGHTING)) {"
+        "if (mRdp->toon_shadow && !is_rect) {"
+        _shadow_source_patched
+        "${_shadow_source_original}")
+    if(_shadow_source_patched STREQUAL _shadow_source_original)
+        message(FATAL_ERROR "Foliage shadow capture condition was not found")
+    endif()
+    file(WRITE "${_shadow_source_path}" "${_shadow_source_patched}")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/src/foliage")
+    file(WRITE "${CMAKE_BINARY_DIR}/src/foliage/interpreter.cpp.lib" "${_shadow_source_patched}")
+endif()
+
 # =========== Sources =============
 add_subdirectory("src")
