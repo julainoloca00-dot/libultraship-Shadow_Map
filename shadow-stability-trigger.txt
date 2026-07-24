@@ -1,0 +1,1 @@
+This temporary file triggers the pull request validation workflow and will be removed before merge.
