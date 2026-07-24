@@ -417,6 +417,25 @@ class Interpreter {
         mShadowEdgeSoftness = edgeSoftness;
         mShadowShowVolume = showVolume;
     }
+    void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3]) {
+        mDynamicShadowsEnabled = enabled;
+        if (lightDir != nullptr) {
+            mDynamicShadowLightDir[0] = lightDir[0];
+            mDynamicShadowLightDir[1] = lightDir[1];
+            mDynamicShadowLightDir[2] = lightDir[2];
+        }
+        if (anchor != nullptr) {
+            mDynamicShadowAnchor[0] = anchor[0];
+            mDynamicShadowAnchor[1] = anchor[1];
+            mDynamicShadowAnchor[2] = anchor[2];
+        }
+        if (!enabled) {
+            mCaptureEnvironmentShadow = false;
+            mEnvironmentShadowCasterAccum.clear();
+            mShadowCasterAccum.clear();
+            mShadowVerts.clear();
+        }
+    }
     void StartFrame();
     void RunGuiOnly();
     void Run(Gfx* commands, const std::unordered_map<Mtx*, MtxF>& mtx_replacements);
@@ -570,8 +589,14 @@ class Interpreter {
     // the existing one-frame deferred behavior while eliminating CPU footprint rasterization and
     // stencil-volume generation.
     std::vector<float> mShadowCasterAccum;
-    float mShadowLightDirAccum[3] = { 0.0f, 0.0f, 0.0f };
-    uint32_t mShadowLightDirSamples = 0;
+    // Visible opaque environment triangles captured before the actor pass. This reuses the normal
+    // Fast3D traversal, so the room is not submitted a second time merely to build the shadow map.
+    std::vector<float> mEnvironmentShadowCasterAccum;
+    bool mDynamicShadowsEnabled = false;
+    bool mCaptureEnvironmentShadow = false;
+    float mDynamicShadowLightDir[3] = { 0.30f, 1.0f, 0.20f };
+    float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };
+    static constexpr size_t kEnvironmentShadowBudgetFloats = 2u * 1024u * 1024u;
     static constexpr uint32_t kDynamicShadowMapResolution = 512;
     static constexpr float kDynamicShadowMapBias = 0.0015f;
     static constexpr int kDynamicShadowMapPcfRadius = 1; // 3x3 Percentage-Closer Filtering

@@ -338,36 +338,19 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 }
 
 void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                                  const float* cameraWorldToClip, const float lightDirection[3],
+                                                  const float* cameraWorldToClip, const float lightDirection[3], const float shadowAnchor[3],
                                                   uint32_t resolution, float opacity, float bias, int pcfRadius) {
     FramebufferDX11& framebuffer = mFrameBuffers[mCurrentFramebuffer];
     if (worldVertices == nullptr || vertexCount < 3 || opacity <= 0.0f || cameraWorldToClip == nullptr ||
-        framebuffer.depth_stencil_srv == nullptr) {
+        shadowAnchor == nullptr || framebuffer.depth_stencil_srv == nullptr) {
         return;
     }
 
     const size_t vertexBytes = vertexCount * 3 * sizeof(float);
     EnsureDynamicShadowResources(std::max<uint32_t>(64, resolution), vertexBytes);
 
-    // Fast3D applies its widescreen correction to clip X after multiplying by P_matrix.
-    // The depth resolve must invert that effective matrix, not the uncorrected P_matrix, or the
-    // reconstructed world position slides as the camera rotates on non-4:3 displays.
-    float effectiveCamera[16];
-    memcpy(effectiveCamera, cameraWorldToClip, sizeof(effectiveCamera));
-    if (mCurrentFramebuffer == 0 && framebuffer.texture_id < mTextures.size()) {
-        const TextureData& colorTarget = mTextures[framebuffer.texture_id];
-        if (colorTarget.width > 0 && colorTarget.height > 0) {
-            const float targetAspect = static_cast<float>(colorTarget.width) /
-                                       static_cast<float>(colorTarget.height);
-            const float aspectScale = (4.0f / 3.0f) / targetAspect;
-            for (int row = 0; row < 4; row++) {
-                effectiveCamera[row * 4] *= aspectScale;
-            }
-        }
-    }
-
     float inverseCamera[16];
-    if (!InvertShadowMatrix4x4(effectiveCamera, inverseCamera)) {
+    if (!InvertShadowMatrix4x4(cameraWorldToClip, inverseCamera)) {
         return;
     }
 
@@ -387,85 +370,20 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     CrossShadowVec(forward, right, up);
     NormalizeShadowVec(up);
 
-    float minX = FLT_MAX;
-    float minY = FLT_MAX;
-    float minZ = FLT_MAX;
-    float maxX = -FLT_MAX;
-    float maxY = -FLT_MAX;
-    float maxZ = -FLT_MAX;
-    for (size_t i = 0; i < vertexCount; i++) {
-        const float p[3] = { worldVertices[i * 3], worldVertices[i * 3 + 1], worldVertices[i * 3 + 2] };
-        const float lx = DotShadowVec(p, right);
-        const float ly = DotShadowVec(p, up);
-        const float lz = DotShadowVec(p, forward);
-        minX = std::min(minX, lx);
-        minY = std::min(minY, ly);
-        minZ = std::min(minZ, lz);
-        maxX = std::max(maxX, lx);
-        maxY = std::max(maxY, ly);
-        maxZ = std::max(maxZ, lz);
-    }
-
-    const float desiredCenterX = (minX + maxX) * 0.5f;
-    const float desiredCenterY = (minY + maxY) * 0.5f;
-    const float desiredHalfExtent =
-        std::max(512.0f, std::max(maxX - minX, maxY - minY) * 0.5f + 96.0f);
-
-    // Quantized square extents avoid continuously changing world-units-per-texel as actors enter
-    // and leave the camera frustum. Hysteresis keeps the current projection until the caster bounds
-    // approach its guard band, so rotating the camera cannot make the shadow map swim.
-    float quantizedHalfExtent = 512.0f;
-    while (quantizedHalfExtent < desiredHalfExtent && quantizedHalfExtent < 16384.0f) {
-        quantizedHalfExtent *= 2.0f;
-    }
-
-    const float directionDot = dir[0] * mDynamicShadowLastDirection[0] +
-                               dir[1] * mDynamicShadowLastDirection[1] +
-                               dir[2] * mDynamicShadowLastDirection[2];
-    if (!mDynamicShadowProjectionValid || directionDot < 0.995f) {
-        mDynamicShadowProjectionValid = true;
-        mDynamicShadowHalfExtent = quantizedHalfExtent;
-        mDynamicShadowCenterX = desiredCenterX;
-        mDynamicShadowCenterY = desiredCenterY;
-    } else {
-        if (quantizedHalfExtent > mDynamicShadowHalfExtent) {
-            mDynamicShadowHalfExtent = quantizedHalfExtent;
-        } else if (quantizedHalfExtent * 4.0f <= mDynamicShadowHalfExtent) {
-            mDynamicShadowHalfExtent = std::max(512.0f, mDynamicShadowHalfExtent * 0.5f);
-        }
-
-        const float guard = std::max(64.0f, mDynamicShadowHalfExtent * 0.15f);
-        const float safeHalf = mDynamicShadowHalfExtent - guard;
-        if (minX < mDynamicShadowCenterX - safeHalf) {
-            mDynamicShadowCenterX = minX + safeHalf;
-        }
-        if (maxX > mDynamicShadowCenterX + safeHalf) {
-            mDynamicShadowCenterX = maxX - safeHalf;
-        }
-        if (minY < mDynamicShadowCenterY - safeHalf) {
-            mDynamicShadowCenterY = minY + safeHalf;
-        }
-        if (maxY > mDynamicShadowCenterY + safeHalf) {
-            mDynamicShadowCenterY = maxY - safeHalf;
-        }
-    }
-
-    mDynamicShadowLastDirection[0] = dir[0];
-    mDynamicShadowLastDirection[1] = dir[1];
-    mDynamicShadowLastDirection[2] = dir[2];
-
-    const float halfX = mDynamicShadowHalfExtent;
-    const float halfY = mDynamicShadowHalfExtent;
+    static constexpr float kShadowWorldHalfExtent = 2048.0f;
+    static constexpr float kShadowWorldDepthHalfExtent = 4096.0f;
+    const float halfX = kShadowWorldHalfExtent;
+    const float halfY = kShadowWorldHalfExtent;
     const float texelX = (halfX * 2.0f) / static_cast<float>(mDynamicShadowResolution);
     const float texelY = (halfY * 2.0f) / static_cast<float>(mDynamicShadowResolution);
-    mDynamicShadowCenterX = floorf(mDynamicShadowCenterX / texelX + 0.5f) * texelX;
-    mDynamicShadowCenterY = floorf(mDynamicShadowCenterY / texelY + 0.5f) * texelY;
-    const float centerX = mDynamicShadowCenterX;
-    const float centerY = mDynamicShadowCenterY;
 
-    minZ -= 256.0f;
-    maxZ += 512.0f;
-    const float depthRange = std::max(1.0f, maxZ - minZ);
+    const float anchorCenterX = DotShadowVec(shadowAnchor, right);
+    const float anchorCenterY = DotShadowVec(shadowAnchor, up);
+    const float centerX = floorf(anchorCenterX / texelX + 0.5f) * texelX;
+    const float centerY = floorf(anchorCenterY / texelY + 0.5f) * texelY;
+    const float anchorCenterZ = DotShadowVec(shadowAnchor, forward);
+    const float minZ = anchorCenterZ - kShadowWorldDepthHalfExtent;
+    const float depthRange = kShadowWorldDepthHalfExtent * 2.0f;
 
     float lightViewProj[16] = {};
     lightViewProj[0] = right[0] / halfX;

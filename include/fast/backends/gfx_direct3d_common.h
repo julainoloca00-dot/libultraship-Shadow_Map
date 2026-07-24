@@ -135,8 +135,8 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     FilteringMode GetTextureFilter() override;
     void SetSrgbMode() override;
     void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                const float* cameraWorldToClip, const float lightDir[3],
-                                uint32_t resolution, float opacity, float bias, int pcfRadius) override;
+                                const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],
+                                        uint32_t resolution, float opacity, float bias, int pcfRadius) override;
     ImTextureID GetTextureById(int id) override;
 
     PFN_D3D11_CREATE_DEVICE mDX11CreateDevice;
@@ -189,13 +189,6 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     DynamicShadowCB mDynamicShadowCbData{};
     uint32_t mDynamicShadowResolution = 0;
     size_t mDynamicShadowVertexBufferBytes = 0;
-    // Persistent world/light-space placement prevents the 512x512 projection from re-centering
-    // whenever camera frustum culling changes the accepted actor set.
-    bool mDynamicShadowProjectionValid = false;
-    float mDynamicShadowCenterX = 0.0f;
-    float mDynamicShadowCenterY = 0.0f;
-    float mDynamicShadowHalfExtent = 512.0f;
-    float mDynamicShadowLastDirection[3] = { 0.0f, 1.0f, 0.0f };
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> mCoordBuffer;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mCoordBufferSrv;
