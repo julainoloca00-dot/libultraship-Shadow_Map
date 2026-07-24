@@ -1,0 +1,59 @@
+name: Apply unlit foliage shadow capture
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: wind-waker-style-cel-shading
+          fetch-depth: 0
+
+      - name: Capture unlit foliage geometry
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/fast/interpreter.cpp')
+          text = path.read_text(encoding='utf-8')
+
+          old_comment = '''    // SOH [Enhancement] Actor shadow: while the shadow pass is armed for this object, record its world-space
+    // triangles here (before any culling, so the whole silhouette is captured). FlushToonShadow drains them
+    // at the object boundary. is_rect screen-space quads (UI) have no world position, so skip them. The
+    // replayed shadow geometry itself runs with toon_shadow cleared, so it is never re-captured. NOTE: this
+    // is gated on toon_shadow only (NOT mRdp->toon), so shadows work even when the cel relight is disabled.
+    if (mRdp->toon_shadow && !is_rect && (mRsp->geometry_mode & G_LIGHTING)) {
+'''
+          new_comment = '''    // SOH [Enhancement] Actor shadow: while the shadow pass is armed for this object, record its world-space
+    // triangles here (before any culling, so the whole silhouette is captured). FlushToonShadow drains them
+    // at the object boundary. is_rect screen-space quads (UI) have no world position, so skip them. The
+    // replayed shadow geometry itself runs with toon_shadow cleared, so it is never re-captured. Capture is
+    // intentionally independent of G_LIGHTING: tree canopy cards and some complete actor silhouette pieces
+    // are unlit display-list geometry. The game arms POLY_XLU only for En_Wood02, so particles, water and
+    // ordinary translucent effects remain excluded while foliage can finally contribute to the shadow map.
+    if (mRdp->toon_shadow && !is_rect) {
+'''
+
+          if text.count(old_comment) != 1:
+              raise SystemExit('expected actor-shadow capture block not found exactly once')
+          text = text.replace(old_comment, new_comment, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit result and clean temporary trigger
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-unlit-tree-shadow.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/fast/interpreter.cpp .github/workflows/apply-unlit-tree-shadow.yml
+          git commit -m "Capture unlit tree foliage in dynamic shadows"
+          git push origin HEAD:wind-waker-style-cel-shading
+          git push origin --delete temp-unlit-tree-shadow || true
