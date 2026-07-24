@@ -189,6 +189,13 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     DynamicShadowCB mDynamicShadowCbData{};
     uint32_t mDynamicShadowResolution = 0;
     size_t mDynamicShadowVertexBufferBytes = 0;
+    // Persistent world/light-space placement prevents the 512x512 projection from re-centering
+    // whenever camera frustum culling changes the accepted actor set.
+    bool mDynamicShadowProjectionValid = false;
+    float mDynamicShadowCenterX = 0.0f;
+    float mDynamicShadowCenterY = 0.0f;
+    float mDynamicShadowHalfExtent = 512.0f;
+    float mDynamicShadowLastDirection[3] = { 0.0f, 1.0f, 0.0f };
 
     Microsoft::WRL::ComPtr<ID3D11Buffer> mCoordBuffer;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mCoordBufferSrv;
