@@ -16,7 +16,7 @@ jobs:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
       - name: Apply source transformation
-        run: python tools/apply_world_shadow_casters.py
+        run: python tools/run_world_shadow_transformer.py
       - name: Commit transformed source
         run: |
           git config user.name "github-actions[bot]"
