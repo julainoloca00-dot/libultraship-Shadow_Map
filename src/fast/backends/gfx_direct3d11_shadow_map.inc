@@ -81,11 +81,11 @@ void GfxRenderingAPIDX11::EnsureDynamicShadowResources(uint32_t resolution, size
     const UINT compileFlags = D3DCOMPILE_OPTIMIZATION_LEVEL2;
     auto compile = [&](const char* source, const char* entry, const char* target, ID3DBlob** blob) {
         ComPtr<ID3DBlob> errors;
-        const HRESULT hr = mD3dCompile(source, strlen(source), nullptr, nullptr, nullptr, entry, target, compileFlags, 0,
-                                       blob, errors.GetAddressOf());
+        const HRESULT hr = mD3dCompile(source, strlen(source), nullptr, nullptr, nullptr, entry, target, compileFlags,
+                                       0, blob, errors.GetAddressOf());
         if (FAILED(hr)) {
-            const char* errorText = errors ? static_cast<const char*>(errors->GetBufferPointer())
-                                           : "Unknown dynamic shadow shader error";
+            const char* errorText =
+                errors ? static_cast<const char*>(errors->GetBufferPointer()) : "Unknown dynamic shadow shader error";
             MessageBoxA(mWindowBackend->GetWindowHandle(), errorText, "Dynamic shadow shader error",
                         MB_OK | MB_ICONERROR);
             throw hr;
@@ -140,6 +140,8 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     float2 shadowUv = float2(lightNdc.x * 0.5 + 0.5, 0.5 - lightNdc.y * 0.5);
     if (shadowUv.x <= 0.0 || shadowUv.x >= 1.0 || shadowUv.y <= 0.0 || shadowUv.y >= 1.0 ||
         lightNdc.z <= 0.0 || lightNdc.z >= 1.0) discard;
+    float edgeDistance = min(min(shadowUv.x, 1.0 - shadowUv.x), min(shadowUv.y, 1.0 - shadowUv.y));
+    float edgeFade = saturate(edgeDistance * 64.0);
 
     int radius = clamp((int)shadowParams.w, 0, 2);
     float lit = 0.0;
@@ -147,14 +149,15 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     [unroll] for (int y = -2; y <= 2; y++) {
         [unroll] for (int x = -2; x <= 2; x++) {
             if (abs(x) <= radius && abs(y) <= radius) {
+                float weight = (x == 0 && y == 0) ? 4.0 : ((x == 0 || y == 0) ? 2.0 : 1.0);
                 lit += shadowDepth.SampleCmpLevelZero(shadowComparison,
-                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y);
-                samples += 1.0;
+                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y) * weight;
+                samples += weight;
             }
         }
     }
     const float shadow = 1.0 - lit / max(samples, 1.0);
-    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow));
+    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));
 }
 )SHADOW";
 
@@ -193,6 +196,8 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     float2 shadowUv = float2(lightNdc.x * 0.5 + 0.5, 0.5 - lightNdc.y * 0.5);
     if (shadowUv.x <= 0.0 || shadowUv.x >= 1.0 || shadowUv.y <= 0.0 || shadowUv.y >= 1.0 ||
         lightNdc.z <= 0.0 || lightNdc.z >= 1.0) discard;
+    float edgeDistance = min(min(shadowUv.x, 1.0 - shadowUv.x), min(shadowUv.y, 1.0 - shadowUv.y));
+    float edgeFade = saturate(edgeDistance * 64.0);
 
     int radius = clamp((int)shadowParams.w, 0, 2);
     float lit = 0.0;
@@ -200,14 +205,15 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     [unroll] for (int y = -2; y <= 2; y++) {
         [unroll] for (int x = -2; x <= 2; x++) {
             if (abs(x) <= radius && abs(y) <= radius) {
+                float weight = (x == 0 && y == 0) ? 4.0 : ((x == 0 || y == 0) ? 2.0 : 1.0);
                 lit += shadowDepth.SampleCmpLevelZero(shadowComparison,
-                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y);
-                samples += 1.0;
+                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y) * weight;
+                samples += weight;
             }
         }
     }
     const float shadow = 1.0 - lit / max(samples, 1.0);
-    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow));
+    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));
 }
 )SHADOW";
 
@@ -220,18 +226,21 @@ float4 PSMain(VSOutput input) : SV_TARGET {
         compile(resolveShader, "PSMain", "ps_4_0", resolvePsBlob.GetAddressOf());
         compile(resolveShaderMsaa, "PSMain", "ps_4_1", resolvePsMsaaBlob.GetAddressOf());
 
-        ThrowIfFailed(mDevice->CreateVertexShader(depthVsBlob->GetBufferPointer(), depthVsBlob->GetBufferSize(), nullptr,
-                                                  mDynamicShadowDepthVs.GetAddressOf()));
-        ThrowIfFailed(mDevice->CreateVertexShader(resolveVsBlob->GetBufferPointer(), resolveVsBlob->GetBufferSize(), nullptr,
-                                                  mDynamicShadowResolveVs.GetAddressOf()));
-        ThrowIfFailed(mDevice->CreatePixelShader(resolvePsBlob->GetBufferPointer(), resolvePsBlob->GetBufferSize(), nullptr,
-                                                  mDynamicShadowResolvePs.GetAddressOf()));
-        ThrowIfFailed(mDevice->CreatePixelShader(resolvePsMsaaBlob->GetBufferPointer(), resolvePsMsaaBlob->GetBufferSize(),
-                                                  nullptr, mDynamicShadowResolvePsMsaa.GetAddressOf()));
+        ThrowIfFailed(mDevice->CreateVertexShader(depthVsBlob->GetBufferPointer(), depthVsBlob->GetBufferSize(),
+                                                  nullptr, mDynamicShadowDepthVs.GetAddressOf()));
+        ThrowIfFailed(mDevice->CreateVertexShader(resolveVsBlob->GetBufferPointer(), resolveVsBlob->GetBufferSize(),
+                                                  nullptr, mDynamicShadowResolveVs.GetAddressOf()));
+        ThrowIfFailed(mDevice->CreatePixelShader(resolvePsBlob->GetBufferPointer(), resolvePsBlob->GetBufferSize(),
+                                                 nullptr, mDynamicShadowResolvePs.GetAddressOf()));
+        ThrowIfFailed(mDevice->CreatePixelShader(resolvePsMsaaBlob->GetBufferPointer(),
+                                                 resolvePsMsaaBlob->GetBufferSize(), nullptr,
+                                                 mDynamicShadowResolvePsMsaa.GetAddressOf()));
 
-        D3D11_INPUT_ELEMENT_DESC input = { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,
-                                           D3D11_INPUT_PER_VERTEX_DATA, 0 };
-        ThrowIfFailed(mDevice->CreateInputLayout(&input, 1, depthVsBlob->GetBufferPointer(), depthVsBlob->GetBufferSize(),
+        D3D11_INPUT_ELEMENT_DESC input = { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,
+                                           0,          0, D3D11_INPUT_PER_VERTEX_DATA,
+                                           0 };
+        ThrowIfFailed(mDevice->CreateInputLayout(&input, 1, depthVsBlob->GetBufferPointer(),
+                                                 depthVsBlob->GetBufferSize(),
                                                  mDynamicShadowInputLayout.GetAddressOf()));
 
         D3D11_BUFFER_DESC cbDesc = {};
@@ -275,7 +284,9 @@ float4 PSMain(VSOutput input) : SV_TARGET {
         ThrowIfFailed(mDevice->CreateBlendState(&blendDesc, mDynamicShadowBlendState.GetAddressOf()));
 
         D3D11_SAMPLER_DESC samplerDesc = {};
-        samplerDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+        // Point comparisons plus a weighted 3x3 kernel preserve the silhouette; hardware linear
+        // comparison filtering blurred each tap again and made a 512 map look much softer than intended.
+        samplerDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
         samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_BORDER;
         samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_BORDER;
         samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
@@ -308,15 +319,15 @@ float4 PSMain(VSOutput input) : SV_TARGET {
         D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
         dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
         dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        ThrowIfFailed(mDevice->CreateDepthStencilView(mDynamicShadowTexture.Get(), &dsvDesc,
-                                                       mDynamicShadowDsv.GetAddressOf()));
+        ThrowIfFailed(
+            mDevice->CreateDepthStencilView(mDynamicShadowTexture.Get(), &dsvDesc, mDynamicShadowDsv.GetAddressOf()));
 
         D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
         srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = 1;
-        ThrowIfFailed(mDevice->CreateShaderResourceView(mDynamicShadowTexture.Get(), &srvDesc,
-                                                         mDynamicShadowSrv.GetAddressOf()));
+        ThrowIfFailed(
+            mDevice->CreateShaderResourceView(mDynamicShadowTexture.Get(), &srvDesc, mDynamicShadowSrv.GetAddressOf()));
         mDynamicShadowResolution = resolution;
     }
 
@@ -338,8 +349,9 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 }
 
 void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                                  const float* cameraWorldToClip, const float lightDirection[3], const float shadowAnchor[3],
-                                                  uint32_t resolution, float opacity, float bias, int pcfRadius) {
+                                                 const float* cameraWorldToClip, const float lightDirection[3],
+                                                 const float shadowAnchor[3], uint32_t resolution, float opacity,
+                                                 float bias, int pcfRadius) {
     FramebufferDX11& framebuffer = mFrameBuffers[mCurrentFramebuffer];
     if (worldVertices == nullptr || vertexCount < 3 || opacity <= 0.0f || cameraWorldToClip == nullptr ||
         shadowAnchor == nullptr || framebuffer.depth_stencil_srv == nullptr) {
@@ -357,21 +369,28 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     float dir[3] = { lightDirection[0], lightDirection[1], lightDirection[2] };
     NormalizeShadowVec(dir);
     float forward[3] = { -dir[0], -dir[1], -dir[2] };
-    float upSeed[3] = { 0.0f, 1.0f, 0.0f };
-    if (fabsf(forward[1]) > 0.95f) {
-        upSeed[0] = 1.0f;
-        upSeed[1] = 0.0f;
-    }
 
-    float right[3];
+    // Build a continuous light-space basis from the horizontal light direction. The old 0.95 threshold
+    // abruptly changed the up seed near vertical light and could rotate the whole shadow map in one frame.
+    float right[3] = { forward[2], 0.0f, -forward[0] };
+    float horizontalLenSq = right[0] * right[0] + right[2] * right[2];
+    if (horizontalLenSq < 1e-8f) {
+        right[0] = 1.0f;
+        right[1] = 0.0f;
+        right[2] = 0.0f;
+    } else {
+        const float invHorizontalLen = 1.0f / sqrtf(horizontalLenSq);
+        right[0] *= invHorizontalLen;
+        right[2] *= invHorizontalLen;
+    }
     float up[3];
-    CrossShadowVec(upSeed, forward, right);
-    NormalizeShadowVec(right);
     CrossShadowVec(forward, right, up);
     NormalizeShadowVec(up);
 
-    static constexpr float kShadowWorldHalfExtent = 2048.0f;
-    static constexpr float kShadowWorldDepthHalfExtent = 4096.0f;
+    // 1024x1024 over a tighter player-centred footprint gives ~3 world units per texel instead of 8.
+    // The depth range still covers tall rooms while improving precision for walls and actor silhouettes.
+    static constexpr float kShadowWorldHalfExtent = 1536.0f;
+    static constexpr float kShadowWorldDepthHalfExtent = 3072.0f;
     const float halfX = kShadowWorldHalfExtent;
     const float halfY = kShadowWorldHalfExtent;
     const float texelX = (halfX * 2.0f) / static_cast<float>(mDynamicShadowResolution);
@@ -469,8 +488,10 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     mContext->PSSetShaderResources(0, 2, nullSrvs);
 
     // Pass 1: rasterize only the accepted camera-visible casters into a 512x512 depth texture.
-    const D3D11_VIEWPORT shadowViewport = { 0.0f, 0.0f, static_cast<float>(mDynamicShadowResolution),
-                                            static_cast<float>(mDynamicShadowResolution), 0.0f, 1.0f };
+    const D3D11_VIEWPORT shadowViewport = {
+        0.0f, 0.0f, static_cast<float>(mDynamicShadowResolution), static_cast<float>(mDynamicShadowResolution),
+        0.0f, 1.0f
+    };
     const D3D11_RECT shadowScissor = { 0, 0, static_cast<LONG>(mDynamicShadowResolution),
                                        static_cast<LONG>(mDynamicShadowResolution) };
     mContext->OMSetRenderTargets(0, nullptr, mDynamicShadowDsv.Get());
@@ -513,9 +534,8 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     mContext->IASetVertexBuffers(0, 1, &nullVb, &zero, &zero);
     mContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     mContext->VSSetShader(mDynamicShadowResolveVs.Get(), nullptr, 0);
-    mContext->PSSetShader(framebuffer.msaa_level > 1 ? mDynamicShadowResolvePsMsaa.Get()
-                                                     : mDynamicShadowResolvePs.Get(),
-                          nullptr, 0);
+    mContext->PSSetShader(
+        framebuffer.msaa_level > 1 ? mDynamicShadowResolvePsMsaa.Get() : mDynamicShadowResolvePs.Get(), nullptr, 0);
     mContext->PSSetConstantBuffers(0, 1, &shadowCb);
     ID3D11ShaderResourceView* resolveSrvs[2] = { framebuffer.depth_stencil_srv.Get(), mDynamicShadowSrv.Get() };
     mContext->PSSetShaderResources(0, 2, resolveSrvs);
