@@ -417,7 +417,8 @@ class Interpreter {
         mShadowEdgeSoftness = edgeSoftness;
         mShadowShowVolume = showVolume;
     }
-    void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3]) {
+    void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3],
+                                      const float localLight[4]) {
         mDynamicShadowsEnabled = enabled;
         if (lightDir != nullptr) {
             float nextDir[3] = { lightDir[0], lightDir[1], lightDir[2] };
@@ -510,6 +511,14 @@ class Interpreter {
             mDynamicShadowAnchor[1] = anchor[1];
             mDynamicShadowAnchor[2] = anchor[2];
         }
+        if (localLight != nullptr) {
+            mDynamicShadowLocalLight[0] = localLight[0];
+            mDynamicShadowLocalLight[1] = localLight[1];
+            mDynamicShadowLocalLight[2] = localLight[2];
+            mDynamicShadowLocalLight[3] = localLight[3] > 0.0f ? localLight[3] : 0.0f;
+        } else {
+            mDynamicShadowLocalLight[3] = 0.0f;
+        }
         if (!enabled) {
             mCaptureEnvironmentShadow = false;
             mEnvironmentShadowCasterAccum.clear();
@@ -517,6 +526,7 @@ class Interpreter {
             mShadowVerts.clear();
             mDynamicShadowLightValid = false;
             mDynamicShadowPendingFrames = 0;
+            mDynamicShadowLocalLight[3] = 0.0f;
         }
     }
     void StartFrame();
@@ -682,10 +692,11 @@ class Interpreter {
     bool mDynamicShadowLightValid = false;
     uint8_t mDynamicShadowPendingFrames = 0;
     float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };
-    static constexpr size_t kEnvironmentShadowBudgetFloats = 2u * 1024u * 1024u;
-    static constexpr float kEnvironmentShadowCaptureRadiusSq = 2304.0f * 2304.0f;
-    static constexpr uint32_t kDynamicShadowMapResolution = 1024;
-    static constexpr float kDynamicShadowMapBias = 0.0012f;
+    float mDynamicShadowLocalLight[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    static constexpr size_t kEnvironmentShadowBudgetFloats = 8u * 1024u * 1024u;
+    static constexpr float kEnvironmentShadowCaptureRadiusSq = 1536.0f * 1536.0f;
+    static constexpr uint32_t kDynamicShadowMapResolution = 4096;
+    static constexpr float kDynamicShadowMapBias = 0.0008f;
     static constexpr int kDynamicShadowMapPcfRadius = 1; // weighted 3x3 Percentage-Closer Filtering
 
     // SOH [Enhancement] Actor shadow: opacity bands the soft edge is built from. Band 0 is the full-opacity

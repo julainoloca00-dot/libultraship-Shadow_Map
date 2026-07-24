@@ -98,6 +98,7 @@ cbuffer DynamicShadowCB : register(b0) {
     row_major float4x4 lightViewProj;
     row_major float4x4 inverseCamera;
     float4 shadowParams;
+    float4 localLight;
 };
 struct VSInput { float3 position : POSITION; };
 float4 VSMain(VSInput input) : SV_POSITION {
@@ -113,6 +114,7 @@ cbuffer DynamicShadowCB : register(b0) {
     row_major float4x4 lightViewProj;
     row_major float4x4 inverseCamera;
     float4 shadowParams;
+    float4 localLight;
 };
 struct VSOutput { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
 VSOutput VSMain(uint vertexId : SV_VertexID) {
@@ -156,8 +158,18 @@ float4 PSMain(VSOutput input) : SV_TARGET {
             }
         }
     }
-    const float shadow = 1.0 - lit / max(samples, 1.0);
-    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));
+    const float rawVisibility = lit / max(samples, 1.0);
+    const float thresholdWidth = max(fwidth(rawVisibility) * 1.5, 0.025);
+    const float visibility = smoothstep(0.5 - thresholdWidth, 0.5 + thresholdWidth, rawVisibility);
+    const float shadow = 1.0 - visibility;
+    float localFill = 0.0;
+    if (localLight.w > 0.0) {
+        localFill = saturate(1.0 - length(world.xyz - localLight.xyz) / localLight.w);
+        localFill = localFill * localFill * (3.0 - 2.0 * localFill);
+    }
+    const float localShadowScale = 1.0 - localFill * 0.85;
+    return float4(0.0, 0.0, 0.0,
+                  saturate(shadowParams.x * shadow * edgeFade * localShadowScale));
 }
 )SHADOW";
 
@@ -169,6 +181,7 @@ cbuffer DynamicShadowCB : register(b0) {
     row_major float4x4 lightViewProj;
     row_major float4x4 inverseCamera;
     float4 shadowParams;
+    float4 localLight;
 };
 struct VSOutput { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };
 VSOutput VSMain(uint vertexId : SV_VertexID) {
@@ -212,8 +225,18 @@ float4 PSMain(VSOutput input) : SV_TARGET {
             }
         }
     }
-    const float shadow = 1.0 - lit / max(samples, 1.0);
-    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));
+    const float rawVisibility = lit / max(samples, 1.0);
+    const float thresholdWidth = max(fwidth(rawVisibility) * 1.5, 0.025);
+    const float visibility = smoothstep(0.5 - thresholdWidth, 0.5 + thresholdWidth, rawVisibility);
+    const float shadow = 1.0 - visibility;
+    float localFill = 0.0;
+    if (localLight.w > 0.0) {
+        localFill = saturate(1.0 - length(world.xyz - localLight.xyz) / localLight.w);
+        localFill = localFill * localFill * (3.0 - 2.0 * localFill);
+    }
+    const float localShadowScale = 1.0 - localFill * 0.85;
+    return float4(0.0, 0.0, 0.0,
+                  saturate(shadowParams.x * shadow * edgeFade * localShadowScale));
 }
 )SHADOW";
 
@@ -264,8 +287,8 @@ float4 PSMain(VSOutput input) : SV_TARGET {
         rasterDesc.FillMode = D3D11_FILL_SOLID;
         rasterDesc.CullMode = D3D11_CULL_NONE;
         rasterDesc.DepthClipEnable = TRUE;
-        rasterDesc.DepthBias = 80;
-        rasterDesc.SlopeScaledDepthBias = 1.5f;
+        rasterDesc.DepthBias = 48;
+        rasterDesc.SlopeScaledDepthBias = 1.0f;
         ThrowIfFailed(mDevice->CreateRasterizerState(&rasterDesc, mDynamicShadowRasterState.GetAddressOf()));
         rasterDesc.DepthBias = 0;
         rasterDesc.SlopeScaledDepthBias = 0.0f;
@@ -350,8 +373,8 @@ float4 PSMain(VSOutput input) : SV_TARGET {
 
 void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
                                                  const float* cameraWorldToClip, const float lightDirection[3],
-                                                 const float shadowAnchor[3], uint32_t resolution, float opacity,
-                                                 float bias, int pcfRadius) {
+                                                 const float shadowAnchor[3], const float localLight[4],
+                                                 uint32_t resolution, float opacity, float bias, int pcfRadius) {
     FramebufferDX11& framebuffer = mFrameBuffers[mCurrentFramebuffer];
     if (worldVertices == nullptr || vertexCount < 3 || opacity <= 0.0f || cameraWorldToClip == nullptr ||
         shadowAnchor == nullptr || framebuffer.depth_stencil_srv == nullptr) {
@@ -387,9 +410,9 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     CrossShadowVec(forward, right, up);
     NormalizeShadowVec(up);
 
-    // 1024x1024 over a tighter player-centred footprint gives ~3 world units per texel instead of 8.
-    // The depth range still covers tall rooms while improving precision for walls and actor silhouettes.
-    static constexpr float kShadowWorldHalfExtent = 1536.0f;
+    // Ultra-quality near cascade: 4096 texels over 2048 world units gives 0.5 world units per texel.
+    // This intentionally prioritizes a Breath-of-the-Wild-like crisp silhouette over GPU cost.
+    static constexpr float kShadowWorldHalfExtent = 1024.0f;
     static constexpr float kShadowWorldDepthHalfExtent = 3072.0f;
     const float halfX = kShadowWorldHalfExtent;
     const float halfY = kShadowWorldHalfExtent;
@@ -425,6 +448,11 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     mDynamicShadowCbData.params[1] = std::max(0.0f, bias);
     mDynamicShadowCbData.params[2] = 1.0f / static_cast<float>(mDynamicShadowResolution);
     mDynamicShadowCbData.params[3] = static_cast<float>(std::clamp(pcfRadius, 0, 2));
+    if (localLight != nullptr) {
+        memcpy(mDynamicShadowCbData.localLight, localLight, sizeof(mDynamicShadowCbData.localLight));
+    } else {
+        memset(mDynamicShadowCbData.localLight, 0, sizeof(mDynamicShadowCbData.localLight));
+    }
 
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     ThrowIfFailed(mContext->Map(mDynamicShadowCb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));

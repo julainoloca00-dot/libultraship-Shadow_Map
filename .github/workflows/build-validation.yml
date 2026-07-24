@@ -1,180 +1,232 @@
 name: build-validation
-
 on:
+  push:
   pull_request:
-
-permissions:
-  contents: write
-
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  apply-ultra-shadows:
-    if: github.actor != 'github-actions[bot]'
+  build-macos:
+    runs-on: macos-14
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: |
+        brew install $(cat .github/workflows/brew-deps.txt)
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2.14
+      with:
+        key: ${{ runner.os }}-mac-ccache-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-mac-ccache-${{ github.ref }}
+          ${{ runner.os }}-mac-ccache-
+    - name: Build libultraship
+      run: |
+        export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+        cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release
+        cmake --build build-cmake --config Release --parallel 10
+    - name: Upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: soh-mac
+        path: build-cmake/src/*.a
+        if-no-files-found: error
+  build-ios:
+    runs-on: macos-14
+    steps:
+    - uses: actions/checkout@v4
+    - name: Cache build folder
+      uses: actions/cache@v4
+      with:
+        save-always: true
+        key: ${{ runner.os }}-14-ios-build-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-14-ios-build-${{ github.ref }}
+          ${{ runner.os }}-14-ios-build-
+        path: |
+          build-cmake
+    - name: Build libultraship
+      run: |
+        cmake --no-warn-unused-cli -H. -Bbuild-cmake -GXcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 -DCMAKE_BUILD_TYPE:STRING=Release
+        cmake --build build-cmake --config Release --parallel 10
+    - name: Upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: soh-ios
+        path: build-cmake/src/*/*.a
+        if-no-files-found: error
+  build-linux:
     runs-on: ubuntu-latest
     steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y $(cat .github/workflows/apt-deps.txt)
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2.14
+      with:
+        key: ${{ matrix.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          ${{ matrix.os }}-ccache-${{ github.ref }}
+          ${{ matrix.os }}-ccache-
+    - name: Install latest SDL
+      run: |
+        export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+        wget https://www.libsdl.org/release/SDL2-2.24.1.tar.gz
+        tar -xzf SDL2-2.24.1.tar.gz
+        cd SDL2-2.24.1
+        ./configure
+        make -j 10
+        sudo make install
+    - name: Install latest tinyxml2
+      run: |
+        export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+        wget https://github.com/leethomason/tinyxml2/archive/refs/tags/10.0.0.tar.gz
+        tar -xzf 10.0.0.tar.gz
+        cd tinyxml2-10.0.0
+        mkdir build
+        cd build
+        cmake ..
+        make
+        sudo make install
+    - name: Build libultraship
+      run: |
+        export PATH="/usr/lib/ccache:/usr/local/opt/ccache/libexec:$PATH"
+        cmake --no-warn-unused-cli -H. -Bbuild-cmake -GNinja -DCMAKE_BUILD_TYPE:STRING=Release
+        cmake --build build-cmake --config Release --parallel 10
+      env:
+        CC: gcc-12
+        CXX: g++-12
+    - name: Upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: soh-linux
+        path: build-cmake/src/*.a
+        if-no-files-found: error
+  build-android:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_HOME: ${{ github.workspace }}/android-ndk/android-ndk-r29
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y $(cat .github/workflows/apt-deps.txt) unzip curl
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2.14
+      with:
+        key: ${{ runner.os }}-android-ccache-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-android-ccache-${{ github.ref }}
+          ${{ runner.os }}-android-ccache-
+    - name: Install Android NDK
+      run: |
+        curl -L https://dl.google.com/android/repository/android-ndk-r29-linux.zip -o android-ndk.zip
+        unzip -q android-ndk.zip
+        mkdir -p android-ndk
+        mv android-ndk-r29 android-ndk/
+    - name: Configure libultraship for Android
+      run: |
+        cmake --no-warn-unused-cli -S . -Bbuild-cmake-android -GNinja \
+          -DCMAKE_BUILD_TYPE:STRING=Release \
+          -DCMAKE_SYSTEM_NAME=Android \
+          -DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake \
+          -DANDROID_NDK=${ANDROID_NDK_HOME} \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=latest \
+          -DANDROID_STL=c++_static
+    - name: Build libultraship for Android
+      run: |
+        cmake --build build-cmake-android --config Release --parallel 10
+    - name: Upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: soh-android
+        path: build-cmake-android/src/*.a
+        if-no-files-found: error
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+    - name: Install dependencies
+      run: |
+        choco install ninja
+        Remove-Item -Path "C:\ProgramData\Chocolatey\bin\ccache.exe" -Force -ErrorAction SilentlyContinue
+    - uses: actions/checkout@v4
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2.14
+      with:
+        variant: sccache
+        key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-ccache-${{ github.ref }}
+          ${{ runner.os }}-ccache-
+    - name: Cache build folder
+      uses: actions/cache@v4
+      with:
+        save-always: true
+        key: ${{ runner.os }}-build-${{ github.ref }}-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-build-${{ github.ref }}
+          ${{ runner.os }}-build-
+        path: |
+          build-cmake
+          D:/a/vcpkg
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: Build libultraship
+      env:
+        VCPKG_ROOT: D:/a/vcpkg
+      run: |
+        set $env:PATH="$env:USERPROFILE/.cargo/bin;$env:PATH"
+        cmake --no-warn-unused-cli -S. -Bbuild-cmake-x64 -GNinja -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE:STRING=Release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DUSE_AUTO_VCPKG=ON -DCMAKE_VS_PLATFORM_NAME=x64
+        cmake --build build-cmake-x64 --config Release --parallel 10
+    - name: Upload build
+      uses: actions/upload-artifact@v4
+      with:
+        name: soh-windows-x64
+        path: build-cmake-x64/src/**/*.lib
+        if-no-files-found: error
+  build-windows-arm64:
+    runs-on: windows-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          choco install ninja
+          Remove-Item -Path "C:\ProgramData\Chocolatey\bin\ccache.exe" -Force -ErrorAction SilentlyContinue
       - uses: actions/checkout@v4
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.14
         with:
-          ref: agent/shadow-hd-trees-light-fill
-          fetch-depth: 0
-
-      - name: Apply 4096 shadow map, threshold and local light fill
+          variant: sccache
+          key: ${{ runner.os }}-ccache-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ github.ref }}
+            ${{ runner.os }}-ccache-
+      - name: Cache build folder
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          key: ${{ runner.os }}-build-${{ github.ref }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ github.ref }}
+            ${{ runner.os }}-build-
+          path: |
+            build-cmake
+            D:/a/vcpkg
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build libultraship
+        env:
+          VCPKG_ROOT: D:/a/vcpkg
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          def sub_once(path: str, pattern: str, replacement: str, flags=re.S) -> None:
-              file = Path(path)
-              text = file.read_text(encoding="utf-8")
-              updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
-              if count != 1:
-                  raise RuntimeError(f"{path}: pattern matched {count} times: {pattern}")
-              file.write_text(updated, encoding="utf-8")
-
-          def replace_all(path: str, old: str, new: str, expected: int) -> None:
-              file = Path(path)
-              text = file.read_text(encoding="utf-8")
-              count = text.count(old)
-              if count != expected:
-                  raise RuntimeError(f"{path}: expected {expected} matches, found {count}: {old!r}")
-              file.write_text(text.replace(old, new), encoding="utf-8")
-
-          sub_once(
-              "include/fast/backends/gfx_direct3d_common.h",
-              r"(struct DynamicShadowCB\s*\{.*?float params\[4\];)(\s*\};)",
-              r"\1\n    // xyz = local point-light position, w = fill radius. Navi lifts directional shadows locally.\n    float localLight[4];\2"
-          )
-          sub_once(
-              "include/fast/backends/gfx_direct3d_common.h",
-              r"void RenderDynamicShadowMap\(const float\* worldVertices, size_t vertexCount,\s*const float\* cameraWorldToClip,\s*const float lightDir\[3\],\s*const float shadowAnchor\[3\],\s*uint32_t resolution, float opacity, float bias, int pcfRadius\) override;",
-              "void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                const float* cameraWorldToClip, const float lightDir[3],\n"
-              "                                const float shadowAnchor[3], const float localLight[4], uint32_t resolution,\n"
-              "                                float opacity, float bias, int pcfRadius) override;"
-          )
-          sub_once(
-              "include/fast/backends/gfx_rendering_api.h",
-              r"virtual void RenderDynamicShadowMap\(const float\* worldVertices, size_t vertexCount,\s*const float\* cameraWorldToClip,\s*const float lightDir\[3\],\s*const float shadowAnchor\[3\],\s*uint32_t resolution, float opacity, float bias, int pcfRadius\)\s*\{",
-              "virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                        const float* cameraWorldToClip, const float lightDir[3],\n"
-              "                                        const float shadowAnchor[3], const float localLight[4],\n"
-              "                                        uint32_t resolution, float opacity, float bias, int pcfRadius) {"
-          )
-
-          sub_once(
-              "include/fast/interpreter.h",
-              r"void SetDynamicShadowCaptureState\(bool enabled, const float lightDir\[3\], const float anchor\[3\]\)\s*\{",
-              "void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3],\n"
-              "                                      const float localLight[4]) {"
-          )
-          sub_once(
-              "include/fast/interpreter.h",
-              r"(if \(anchor != nullptr\) \{.*?mDynamicShadowAnchor\[2\] = anchor\[2\];\s*\})\s*(if \(!enabled\) \{)",
-              r"\1\n        if (localLight != nullptr) {\n            mDynamicShadowLocalLight[0] = localLight[0];\n            mDynamicShadowLocalLight[1] = localLight[1];\n            mDynamicShadowLocalLight[2] = localLight[2];\n            mDynamicShadowLocalLight[3] = localLight[3] > 0.0f ? localLight[3] : 0.0f;\n        } else {\n            mDynamicShadowLocalLight[3] = 0.0f;\n        }\n        \2"
-          )
-          sub_once(
-              "include/fast/interpreter.h",
-              r"(mDynamicShadowPendingFrames = 0;\s*)(\}\s*\}\s*void StartFrame\(\);)",
-              r"\1            mDynamicShadowLocalLight[3] = 0.0f;\n        \2"
-          )
-          sub_once(
-              "include/fast/interpreter.h",
-              r"float mDynamicShadowAnchor\[3\] = \{ 0\.0f, 0\.0f, 0\.0f \};\s*static constexpr size_t kEnvironmentShadowBudgetFloats = 2u \* 1024u \* 1024u;\s*static constexpr float kEnvironmentShadowCaptureRadiusSq = 2304\.0f \* 2304\.0f;\s*static constexpr uint32_t kDynamicShadowMapResolution = 1024;\s*static constexpr float kDynamicShadowMapBias = 0\.0012f;",
-              "float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };\n"
-              "    float mDynamicShadowLocalLight[4] = { 0.0f, 0.0f, 0.0f, 0.0f };\n"
-              "    static constexpr size_t kEnvironmentShadowBudgetFloats = 8u * 1024u * 1024u;\n"
-              "    static constexpr float kEnvironmentShadowCaptureRadiusSq = 1536.0f * 1536.0f;\n"
-              "    static constexpr uint32_t kDynamicShadowMapResolution = 4096;\n"
-              "    static constexpr float kDynamicShadowMapBias = 0.0008f;"
-          )
-
-          sub_once(
-              "src/fast/interpreter.cpp",
-              r"effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor,\s*kDynamicShadowMapResolution, std::clamp\(mToonShadowAlpha, 0\.0f, 1\.0f\),",
-              "effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor, mDynamicShadowLocalLight,\n"
-              "                                  kDynamicShadowMapResolution, std::clamp(mToonShadowAlpha, 0.0f, 1.0f),"
-          )
-
-          cbuffer_old = (
-              "cbuffer DynamicShadowCB : register(b0) {\n"
-              "    row_major float4x4 lightViewProj;\n"
-              "    row_major float4x4 inverseCamera;\n"
-              "    float4 shadowParams;\n"
-              "};"
-          )
-          cbuffer_new = (
-              "cbuffer DynamicShadowCB : register(b0) {\n"
-              "    row_major float4x4 lightViewProj;\n"
-              "    row_major float4x4 inverseCamera;\n"
-              "    float4 shadowParams;\n"
-              "    float4 localLight;\n"
-              "};"
-          )
-          replace_all("src/fast/backends/gfx_direct3d11_shadow_map.inc", cbuffer_old, cbuffer_new, 3)
-
-          alpha_old = (
-              "    const float shadow = 1.0 - lit / max(samples, 1.0);\n"
-              "    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));"
-          )
-          alpha_new = (
-              "    const float rawVisibility = lit / max(samples, 1.0);\n"
-              "    const float thresholdWidth = max(fwidth(rawVisibility) * 1.5, 0.025);\n"
-              "    const float visibility = smoothstep(0.5 - thresholdWidth, 0.5 + thresholdWidth, rawVisibility);\n"
-              "    const float shadow = 1.0 - visibility;\n"
-              "    float localFill = 0.0;\n"
-              "    if (localLight.w > 0.0) {\n"
-              "        localFill = saturate(1.0 - length(world.xyz - localLight.xyz) / localLight.w);\n"
-              "        localFill = localFill * localFill * (3.0 - 2.0 * localFill);\n"
-              "    }\n"
-              "    const float localShadowScale = 1.0 - localFill * 0.85;\n"
-              "    return float4(0.0, 0.0, 0.0,\n"
-              "                  saturate(shadowParams.x * shadow * edgeFade * localShadowScale));"
-          )
-          replace_all("src/fast/backends/gfx_direct3d11_shadow_map.inc", alpha_old, alpha_new, 2)
-
-          sub_once(
-              "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              r"void GfxRenderingAPIDX11::RenderDynamicShadowMap\(const float\* worldVertices, size_t vertexCount,\s*const float\* cameraWorldToClip, const float lightDirection\[3\],\s*const float shadowAnchor\[3\], uint32_t resolution, float opacity,\s*float bias, int pcfRadius\) \{",
-              "void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,\n"
-              "                                                  const float* cameraWorldToClip,\n"
-              "                                                  const float lightDirection[3], const float shadowAnchor[3],\n"
-              "                                                  const float localLight[4], uint32_t resolution, float opacity,\n"
-              "                                                  float bias, int pcfRadius) {"
-          )
-          sub_once(
-              "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              r"// 1024x1024 over a tighter player-centred footprint gives ~3 world units per texel instead of 8\.\s*// The depth range still covers tall rooms while improving precision for walls and actor silhouettes\.\s*static constexpr float kShadowWorldHalfExtent = 1536\.0f;",
-              "// Ultra-quality near cascade: 4096 texels over 2048 world units gives 0.5 world units per texel.\n"
-              "    // This intentionally prioritizes a Breath-of-the-Wild-like crisp silhouette over GPU cost.\n"
-              "    static constexpr float kShadowWorldHalfExtent = 1024.0f;"
-          )
-          sub_once(
-              "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              r"rasterDesc\.DepthBias = 80;\s*rasterDesc\.SlopeScaledDepthBias = 1\.5f;",
-              "rasterDesc.DepthBias = 48;\n        rasterDesc.SlopeScaledDepthBias = 1.0f;"
-          )
-          sub_once(
-              "src/fast/backends/gfx_direct3d11_shadow_map.inc",
-              r"(mDynamicShadowCbData\.params\[3\] = static_cast<float>\(std::clamp\(pcfRadius, 0, 2\)\);)\s*(D3D11_MAPPED_SUBRESOURCE mapped = \{\};)",
-              r"\1\n    if (localLight != nullptr) {\n        memcpy(mDynamicShadowCbData.localLight, localLight, sizeof(mDynamicShadowCbData.localLight));\n    } else {\n        memset(mDynamicShadowCbData.localLight, 0, sizeof(mDynamicShadowCbData.localLight));\n    }\n\n    \2"
-          )
-          PY
-
-      - name: Format changed files
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format-14
-          clang-format-14 -i \
-            include/fast/backends/gfx_direct3d_common.h \
-            include/fast/backends/gfx_rendering_api.h \
-            include/fast/interpreter.h \
-            src/fast/interpreter.cpp \
-            src/fast/backends/gfx_direct3d11_shadow_map.inc
-
-      - name: Restore validation workflow and commit source only
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git show origin/wind-waker-style-cel-shading:.github/workflows/build-validation.yml > .github/workflows/build-validation.yml
-          git add -A
-          git commit -m "Add ultra-definition shadow threshold and local light fill"
-          git push origin HEAD:agent/shadow-hd-trees-light-fill
+          set $env:PATH="$env:USERPROFILE/.cargo/bin;$env:PATH"
+          cmake --no-warn-unused-cli -S. -Bbuild-cmake-arm64 -G "Visual Studio 17 2022" -T v143  -DCMAKE_BUILD_TYPE:STRING=Release -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DUSE_AUTO_VCPKG=ON -DCMAKE_VS_PLATFORM_NAME=arm64
+          cmake --build build-cmake-arm64 --config Release --parallel 10
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: soh-windows-arm64
+          path: x64/**/*.lib
+          if-no-files-found: error

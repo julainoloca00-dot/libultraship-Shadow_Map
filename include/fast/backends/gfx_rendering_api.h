@@ -95,8 +95,8 @@ class GfxRenderingAPI {
     // frame's camera-visible caster triangles in world space. Backends that do not implement this
     // hook retain the existing shadow path; DX11 renders a low-resolution depth map and resolves it
     // over the scene with PCF.
-    virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                        const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],
+    virtual void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount, const float* cameraWorldToClip,
+                                        const float lightDir[3], const float shadowAnchor[3], const float localLight[4],
                                         uint32_t resolution, float opacity, float bias, int pcfRadius) {
     }
 

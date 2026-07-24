@@ -2533,10 +2533,10 @@ void Interpreter::RenderShadowVolumes() {
     }
 
     const size_t vertexCount = mEnvironmentShadowCasterAccum.size() / 3;
-    mRapi->RenderDynamicShadowMap(vertexCount >= 3 ? mEnvironmentShadowCasterAccum.data() : nullptr, vertexCount,
-                                  effectiveCamera, mDynamicShadowLightDir, mDynamicShadowAnchor,
-                                  kDynamicShadowMapResolution, std::clamp(mToonShadowAlpha, 0.0f, 1.0f),
-                                  kDynamicShadowMapBias, kDynamicShadowMapPcfRadius);
+    mRapi->RenderDynamicShadowMap(
+        vertexCount >= 3 ? mEnvironmentShadowCasterAccum.data() : nullptr, vertexCount, effectiveCamera,
+        mDynamicShadowLightDir, mDynamicShadowAnchor, mDynamicShadowLocalLight, kDynamicShadowMapResolution,
+        std::clamp(mToonShadowAlpha, 0.0f, 1.0f), kDynamicShadowMapBias, kDynamicShadowMapPcfRadius);
 
     mEnvironmentShadowCasterAccum.clear();
     mShadowCasterAccum.clear();

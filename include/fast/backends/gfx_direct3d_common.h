@@ -39,6 +39,8 @@ struct DynamicShadowCB {
     float inverseCamera[16];
     // x = opacity, y = receiver bias, z = inverse map resolution, w = PCF radius
     float params[4];
+    // xyz = local point-light position, w = fill radius. Navi lifts directional shadows locally.
+    float localLight[4];
 };
 
 struct PerDrawCB {
@@ -134,9 +136,9 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     void SetTextureFilter(FilteringMode mode) override;
     FilteringMode GetTextureFilter() override;
     void SetSrgbMode() override;
-    void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
-                                const float* cameraWorldToClip, const float lightDir[3], const float shadowAnchor[3],
-                                        uint32_t resolution, float opacity, float bias, int pcfRadius) override;
+    void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount, const float* cameraWorldToClip,
+                                const float lightDir[3], const float shadowAnchor[3], const float localLight[4],
+                                uint32_t resolution, float opacity, float bias, int pcfRadius) override;
     ImTextureID GetTextureById(int id) override;
 
     PFN_D3D11_CREATE_DEVICE mDX11CreateDevice;
