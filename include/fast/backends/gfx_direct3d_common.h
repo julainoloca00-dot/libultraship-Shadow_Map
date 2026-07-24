@@ -34,6 +34,13 @@ struct PerToonCB {
     float _toon_pad[2];
 };
 
+struct DynamicShadowCB {
+    float lightViewProj[16];
+    float inverseCamera[16];
+    // x = opacity, y = receiver bias, z = inverse map resolution, w = PCF radius
+    float params[4];
+};
+
 struct PerDrawCB {
     struct Texture {
         uint32_t width;
@@ -127,6 +134,9 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     void SetTextureFilter(FilteringMode mode) override;
     FilteringMode GetTextureFilter() override;
     void SetSrgbMode() override;
+    void RenderDynamicShadowMap(const float* worldVertices, size_t vertexCount,
+                                const float* cameraWorldToClip, const float lightDir[3],
+                                uint32_t resolution, float opacity, float bias, int pcfRadius) override;
     ImTextureID GetTextureById(int id) override;
 
     PFN_D3D11_CREATE_DEVICE mDX11CreateDevice;
@@ -138,6 +148,8 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
   private:
     void CreateDepthStencilObjects(uint32_t width, uint32_t height, uint32_t msaa_count, ID3D11DepthStencilView** view,
                                    ID3D11ShaderResourceView** srv);
+
+    void EnsureDynamicShadowResources(uint32_t resolution, size_t vertexBytes);
 
     HMODULE mDX11Module;
 
@@ -157,6 +169,27 @@ class GfxRenderingAPIDX11 final : public GfxRenderingAPI {
     Microsoft::WRL::ComPtr<ID3D11Buffer> mPerFrameCb;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mPerDrawCb;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mPerToonCb; // SOH [Enhancement] toon lighting (register b2)
+    // SOH [Enhancement] 512x512 directional shadow depth + deferred PCF resolve.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> mDynamicShadowTexture;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilView> mDynamicShadowDsv;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mDynamicShadowSrv;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> mDynamicShadowVertexBuffer;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> mDynamicShadowCb;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> mDynamicShadowDepthVs;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader> mDynamicShadowResolveVs;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> mDynamicShadowResolvePs;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> mDynamicShadowResolvePsMsaa;
+    Microsoft::WRL::ComPtr<ID3D11InputLayout> mDynamicShadowInputLayout;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> mDynamicShadowDepthState;
+    Microsoft::WRL::ComPtr<ID3D11DepthStencilState> mDynamicShadowResolveDepthState;
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> mDynamicShadowRasterState;
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> mDynamicShadowResolveRasterState;
+    Microsoft::WRL::ComPtr<ID3D11BlendState> mDynamicShadowBlendState;
+    Microsoft::WRL::ComPtr<ID3D11SamplerState> mDynamicShadowComparisonSampler;
+    DynamicShadowCB mDynamicShadowCbData{};
+    uint32_t mDynamicShadowResolution = 0;
+    size_t mDynamicShadowVertexBufferBytes = 0;
+
     Microsoft::WRL::ComPtr<ID3D11Buffer> mCoordBuffer;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> mCoordBufferSrv;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mDepthValueOutputBuffer;

@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <cfloat>
+#include <algorithm>
 
 #include <map>
 #include <unordered_map>
@@ -47,6 +48,8 @@
 using namespace Microsoft::WRL; // For ComPtr
 
 namespace Fast {
+
+#include "gfx_direct3d11_shadow_map.inc"
 
 GfxRenderingAPIDX11::~GfxRenderingAPIDX11() {
 }
@@ -962,11 +965,13 @@ void GfxRenderingAPIDX11::UpdateFramebufferParameters(int fb_id, uint32_t width,
         tex.height = height;
     }
 
+    // The deferred PCF resolve samples the default framebuffer depth even when callers do not request extraction.
+    const bool needDepthSrv = can_extract_depth || fb_id == 0;
     if (has_depth_buffer &&
-        (diff || !fb.has_depth_buffer || (fb.depth_stencil_srv.Get() != nullptr) != can_extract_depth)) {
+        (diff || !fb.has_depth_buffer || (fb.depth_stencil_srv.Get() != nullptr) != needDepthSrv)) {
         fb.depth_stencil_srv.Reset();
         CreateDepthStencilObjects(width, height, msaa_level, fb.depth_stencil_view.ReleaseAndGetAddressOf(),
-                                  can_extract_depth ? fb.depth_stencil_srv.GetAddressOf() : nullptr);
+                                  needDepthSrv ? fb.depth_stencil_srv.GetAddressOf() : nullptr);
     }
     if (!has_depth_buffer) {
         fb.depth_stencil_view.Reset();
