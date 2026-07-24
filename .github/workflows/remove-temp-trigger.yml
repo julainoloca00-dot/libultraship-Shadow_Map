@@ -1,0 +1,35 @@
+name: remove-temp-trigger
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cleanup:
+    if: github.event.pull_request.title == 'Consolidate libultraship celshade branch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Remove temporary workflow and trigger branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git rm .github/workflows/remove-temp-trigger.yml
+          git commit -m 'Remove temporary branch cleanup workflow'
+          git push origin HEAD:main
+
+          gh pr close '${{ github.event.pull_request.number }}' \
+            --repo julainoloca00-dot/libultraship-Shadow_Map \
+            --delete-branch \
+            --comment 'Branch temporária removida; código preservado na celshade.'
