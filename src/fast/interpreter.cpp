@@ -1541,6 +1541,54 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         }
     }
 
+    // Capture a short guard volume before camera rejection. Nearby walls and props just outside the
+    // viewport can still cast into the visible image, so dropping them at the exact screen edge made the
+    // shadow blink while rotating the camera. Distance and opacity gates keep this far cheaper than capturing
+    // the whole room, and the guard radius lies just outside the shadow-map footprint.
+    if (mCaptureEnvironmentShadow && !mFbActive && !is_rect &&
+        (v1->w > 0.0f || v2->w > 0.0f || v3->w > 0.0f) &&
+        mEnvironmentShadowCasterAccum.size() + 9 <= kEnvironmentShadowBudgetFloats) {
+        bool shadowDepthTest = (mRsp->geometry_mode & G_ZBUFFER) == G_ZBUFFER;
+        bool shadowDepthMask = (mRdp->other_mode_l & Z_UPD) == Z_UPD;
+        bool shadowUseAlpha =
+            ((mRdp->other_mode_l & (3 << 20)) == (G_BL_CLR_MEM << 20) &&
+             (mRdp->other_mode_l & (3 << 16)) == (G_BL_1MA << 16)) ||
+            ((mRdp->other_mode_l & (3 << 22)) == (G_BL_CLR_MEM << 22) &&
+             (mRdp->other_mode_l & (3 << 18)) == (G_BL_1MA << 18));
+        bool shadowTextureEdge = (mRdp->other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
+        bool shadowAlphaThreshold = (mRdp->other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_THRESHOLD;
+        bool shadowInvisible = (mRdp->other_mode_l & (3 << 24)) == (G_BL_0 << 24) &&
+                               (mRdp->other_mode_l & (3 << 20)) == (G_BL_CLR_MEM << 20);
+        if (shadowTextureEdge) {
+            if (shadowUseAlpha) {
+                shadowAlphaThreshold = true;
+                shadowTextureEdge = false;
+            }
+            shadowUseAlpha = true;
+        }
+        const uint32_t shadowCycleType = mRdp->other_mode_h & (3U << G_MDSFT_CYCLETYPE);
+        const float centerX = (v1->wx + v2->wx + v3->wx) / 3.0f;
+        const float centerY = (v1->wy + v2->wy + v3->wy) / 3.0f;
+        const float centerZ = (v1->wz + v2->wz + v3->wz) / 3.0f;
+        const float anchorDx = centerX - mDynamicShadowAnchor[0];
+        const float anchorDy = centerY - mDynamicShadowAnchor[1];
+        const float anchorDz = centerZ - mDynamicShadowAnchor[2];
+        const bool insideShadowGuard =
+            anchorDx * anchorDx + anchorDz * anchorDz <= kEnvironmentShadowCaptureRadiusSq &&
+            fabsf(anchorDy) <= 3072.0f;
+        const bool opaqueEnvironmentCaster =
+            insideShadowGuard && shadowDepthTest && shadowDepthMask && !shadowUseAlpha && !shadowTextureEdge &&
+            !shadowAlphaThreshold && !shadowInvisible && shadowCycleType != G_CYC_COPY &&
+            shadowCycleType != G_CYC_FILL;
+        if (opaqueEnvironmentCaster) {
+            for (int si = 0; si < 3; si++) {
+                mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wx);
+                mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wy);
+                mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wz);
+            }
+        }
+    }
+
     // if (rand()%2) return;
 
     if (v1->clip_rej & v2->clip_rej & v3->clip_rej) {

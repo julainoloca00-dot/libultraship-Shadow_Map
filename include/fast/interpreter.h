@@ -420,9 +420,90 @@ class Interpreter {
     void SetDynamicShadowCaptureState(bool enabled, const float lightDir[3], const float anchor[3]) {
         mDynamicShadowsEnabled = enabled;
         if (lightDir != nullptr) {
-            mDynamicShadowLightDir[0] = lightDir[0];
-            mDynamicShadowLightDir[1] = lightDir[1];
-            mDynamicShadowLightDir[2] = lightDir[2];
+            float nextDir[3] = { lightDir[0], lightDir[1], lightDir[2] };
+            float lenSq = nextDir[0] * nextDir[0] + nextDir[1] * nextDir[1] + nextDir[2] * nextDir[2];
+            if (lenSq < 1e-8f) {
+                nextDir[0] = 0.30f;
+                nextDir[1] = 1.0f;
+                nextDir[2] = 0.20f;
+                lenSq = nextDir[0] * nextDir[0] + nextDir[1] * nextDir[1] + nextDir[2] * nextDir[2];
+            }
+            float invLen = 1.0f / sqrtf(lenSq);
+            nextDir[0] *= invLen;
+            nextDir[1] *= invLen;
+            nextDir[2] *= invLen;
+
+            // Shadow rays must come from above. Reuse the existing Length slider's minimum elevation so
+            // a low sun or moon cannot create kilometer-long silhouettes across the room.
+            if (nextDir[1] < 0.0f) {
+                nextDir[0] = -nextDir[0];
+                nextDir[1] = -nextDir[1];
+                nextDir[2] = -nextDir[2];
+            }
+            float minElevation = mToonShadowMinElevation;
+            if (minElevation < 0.35f) {
+                minElevation = 0.35f;
+            } else if (minElevation > 0.85f) {
+                minElevation = 0.85f;
+            }
+            if (nextDir[1] < minElevation) {
+                float horizontalLen = sqrtf(nextDir[0] * nextDir[0] + nextDir[2] * nextDir[2]);
+                float horizontalTarget = sqrtf(1.0f - minElevation * minElevation);
+                if (horizontalLen > 1e-5f) {
+                    float horizontalScale = horizontalTarget / horizontalLen;
+                    nextDir[0] *= horizontalScale;
+                    nextDir[2] *= horizontalScale;
+                } else {
+                    nextDir[0] = horizontalTarget;
+                    nextDir[2] = 0.0f;
+                }
+                nextDir[1] = minElevation;
+            }
+
+            if (!mDynamicShadowLightValid) {
+                mDynamicShadowLightDir[0] = nextDir[0];
+                mDynamicShadowLightDir[1] = nextDir[1];
+                mDynamicShadowLightDir[2] = nextDir[2];
+                mDynamicShadowLightValid = true;
+                mDynamicShadowPendingFrames = 0;
+            } else {
+                float dot = mDynamicShadowLightDir[0] * nextDir[0] + mDynamicShadowLightDir[1] * nextDir[1] +
+                            mDynamicShadowLightDir[2] * nextDir[2];
+                if (dot < 0.5f) {
+                    // At dawn/dusk the engine can alternate between sun and moon for a few frames. Require
+                    // a large direction change to remain stable before accepting it, preventing full-map flashes.
+                    float pendingDot = mDynamicShadowPendingDir[0] * nextDir[0] +
+                                       mDynamicShadowPendingDir[1] * nextDir[1] +
+                                       mDynamicShadowPendingDir[2] * nextDir[2];
+                    if (mDynamicShadowPendingFrames == 0 || pendingDot < 0.98f) {
+                        mDynamicShadowPendingDir[0] = nextDir[0];
+                        mDynamicShadowPendingDir[1] = nextDir[1];
+                        mDynamicShadowPendingDir[2] = nextDir[2];
+                        mDynamicShadowPendingFrames = 1;
+                    } else if (++mDynamicShadowPendingFrames >= 8) {
+                        mDynamicShadowLightDir[0] = nextDir[0];
+                        mDynamicShadowLightDir[1] = nextDir[1];
+                        mDynamicShadowLightDir[2] = nextDir[2];
+                        mDynamicShadowPendingFrames = 0;
+                    }
+                } else {
+                    mDynamicShadowPendingFrames = 0;
+                    constexpr float blend = 0.12f;
+                    float filtered[3] = {
+                        mDynamicShadowLightDir[0] + (nextDir[0] - mDynamicShadowLightDir[0]) * blend,
+                        mDynamicShadowLightDir[1] + (nextDir[1] - mDynamicShadowLightDir[1]) * blend,
+                        mDynamicShadowLightDir[2] + (nextDir[2] - mDynamicShadowLightDir[2]) * blend,
+                    };
+                    float filteredLenSq = filtered[0] * filtered[0] + filtered[1] * filtered[1] +
+                                          filtered[2] * filtered[2];
+                    if (filteredLenSq > 1e-8f) {
+                        float filteredInvLen = 1.0f / sqrtf(filteredLenSq);
+                        mDynamicShadowLightDir[0] = filtered[0] * filteredInvLen;
+                        mDynamicShadowLightDir[1] = filtered[1] * filteredInvLen;
+                        mDynamicShadowLightDir[2] = filtered[2] * filteredInvLen;
+                    }
+                }
+            }
         }
         if (anchor != nullptr) {
             mDynamicShadowAnchor[0] = anchor[0];
@@ -434,6 +515,8 @@ class Interpreter {
             mEnvironmentShadowCasterAccum.clear();
             mShadowCasterAccum.clear();
             mShadowVerts.clear();
+            mDynamicShadowLightValid = false;
+            mDynamicShadowPendingFrames = 0;
         }
     }
     void StartFrame();
@@ -595,11 +678,15 @@ class Interpreter {
     bool mDynamicShadowsEnabled = false;
     bool mCaptureEnvironmentShadow = false;
     float mDynamicShadowLightDir[3] = { 0.30f, 1.0f, 0.20f };
+    float mDynamicShadowPendingDir[3] = { 0.30f, 1.0f, 0.20f };
+    bool mDynamicShadowLightValid = false;
+    uint8_t mDynamicShadowPendingFrames = 0;
     float mDynamicShadowAnchor[3] = { 0.0f, 0.0f, 0.0f };
     static constexpr size_t kEnvironmentShadowBudgetFloats = 2u * 1024u * 1024u;
-    static constexpr uint32_t kDynamicShadowMapResolution = 512;
-    static constexpr float kDynamicShadowMapBias = 0.0015f;
-    static constexpr int kDynamicShadowMapPcfRadius = 1; // 3x3 Percentage-Closer Filtering
+    static constexpr float kEnvironmentShadowCaptureRadiusSq = 2304.0f * 2304.0f;
+    static constexpr uint32_t kDynamicShadowMapResolution = 1024;
+    static constexpr float kDynamicShadowMapBias = 0.0012f;
+    static constexpr int kDynamicShadowMapPcfRadius = 1; // weighted 3x3 Percentage-Closer Filtering
 
     // SOH [Enhancement] Actor shadow: opacity bands the soft edge is built from. Band 0 is the full-opacity
     // core; higher bands are the one-cell penumbra rings around the silhouette, composited at stepped-down

@@ -140,6 +140,8 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     float2 shadowUv = float2(lightNdc.x * 0.5 + 0.5, 0.5 - lightNdc.y * 0.5);
     if (shadowUv.x <= 0.0 || shadowUv.x >= 1.0 || shadowUv.y <= 0.0 || shadowUv.y >= 1.0 ||
         lightNdc.z <= 0.0 || lightNdc.z >= 1.0) discard;
+    float edgeDistance = min(min(shadowUv.x, 1.0 - shadowUv.x), min(shadowUv.y, 1.0 - shadowUv.y));
+    float edgeFade = saturate(edgeDistance * 64.0);
 
     int radius = clamp((int)shadowParams.w, 0, 2);
     float lit = 0.0;
@@ -147,14 +149,15 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     [unroll] for (int y = -2; y <= 2; y++) {
         [unroll] for (int x = -2; x <= 2; x++) {
             if (abs(x) <= radius && abs(y) <= radius) {
+                float weight = (x == 0 && y == 0) ? 4.0 : ((x == 0 || y == 0) ? 2.0 : 1.0);
                 lit += shadowDepth.SampleCmpLevelZero(shadowComparison,
-                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y);
-                samples += 1.0;
+                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y) * weight;
+                samples += weight;
             }
         }
     }
     const float shadow = 1.0 - lit / max(samples, 1.0);
-    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow));
+    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));
 }
 )SHADOW";
 
@@ -193,6 +196,8 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     float2 shadowUv = float2(lightNdc.x * 0.5 + 0.5, 0.5 - lightNdc.y * 0.5);
     if (shadowUv.x <= 0.0 || shadowUv.x >= 1.0 || shadowUv.y <= 0.0 || shadowUv.y >= 1.0 ||
         lightNdc.z <= 0.0 || lightNdc.z >= 1.0) discard;
+    float edgeDistance = min(min(shadowUv.x, 1.0 - shadowUv.x), min(shadowUv.y, 1.0 - shadowUv.y));
+    float edgeFade = saturate(edgeDistance * 64.0);
 
     int radius = clamp((int)shadowParams.w, 0, 2);
     float lit = 0.0;
@@ -200,14 +205,15 @@ float4 PSMain(VSOutput input) : SV_TARGET {
     [unroll] for (int y = -2; y <= 2; y++) {
         [unroll] for (int x = -2; x <= 2; x++) {
             if (abs(x) <= radius && abs(y) <= radius) {
+                float weight = (x == 0 && y == 0) ? 4.0 : ((x == 0 || y == 0) ? 2.0 : 1.0);
                 lit += shadowDepth.SampleCmpLevelZero(shadowComparison,
-                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y);
-                samples += 1.0;
+                    shadowUv + float2(x, y) * shadowParams.z, lightNdc.z - shadowParams.y) * weight;
+                samples += weight;
             }
         }
     }
     const float shadow = 1.0 - lit / max(samples, 1.0);
-    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow));
+    return float4(0.0, 0.0, 0.0, saturate(shadowParams.x * shadow * edgeFade));
 }
 )SHADOW";
 
@@ -275,7 +281,9 @@ float4 PSMain(VSOutput input) : SV_TARGET {
         ThrowIfFailed(mDevice->CreateBlendState(&blendDesc, mDynamicShadowBlendState.GetAddressOf()));
 
         D3D11_SAMPLER_DESC samplerDesc = {};
-        samplerDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+        // Point comparisons plus a weighted 3x3 kernel preserve the silhouette; hardware linear
+        // comparison filtering blurred each tap again and made a 512 map look much softer than intended.
+        samplerDesc.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
         samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_BORDER;
         samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_BORDER;
         samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
@@ -357,21 +365,28 @@ void GfxRenderingAPIDX11::RenderDynamicShadowMap(const float* worldVertices, siz
     float dir[3] = { lightDirection[0], lightDirection[1], lightDirection[2] };
     NormalizeShadowVec(dir);
     float forward[3] = { -dir[0], -dir[1], -dir[2] };
-    float upSeed[3] = { 0.0f, 1.0f, 0.0f };
-    if (fabsf(forward[1]) > 0.95f) {
-        upSeed[0] = 1.0f;
-        upSeed[1] = 0.0f;
-    }
 
-    float right[3];
+    // Build a continuous light-space basis from the horizontal light direction. The old 0.95 threshold
+    // abruptly changed the up seed near vertical light and could rotate the whole shadow map in one frame.
+    float right[3] = { forward[2], 0.0f, -forward[0] };
+    float horizontalLenSq = right[0] * right[0] + right[2] * right[2];
+    if (horizontalLenSq < 1e-8f) {
+        right[0] = 1.0f;
+        right[1] = 0.0f;
+        right[2] = 0.0f;
+    } else {
+        const float invHorizontalLen = 1.0f / sqrtf(horizontalLenSq);
+        right[0] *= invHorizontalLen;
+        right[2] *= invHorizontalLen;
+    }
     float up[3];
-    CrossShadowVec(upSeed, forward, right);
-    NormalizeShadowVec(right);
     CrossShadowVec(forward, right, up);
     NormalizeShadowVec(up);
 
-    static constexpr float kShadowWorldHalfExtent = 2048.0f;
-    static constexpr float kShadowWorldDepthHalfExtent = 4096.0f;
+    // 1024x1024 over a tighter player-centred footprint gives ~3 world units per texel instead of 8.
+    // The depth range still covers tall rooms while improving precision for walls and actor silhouettes.
+    static constexpr float kShadowWorldHalfExtent = 1536.0f;
+    static constexpr float kShadowWorldDepthHalfExtent = 3072.0f;
     const float halfX = kShadowWorldHalfExtent;
     const float halfY = kShadowWorldHalfExtent;
     const float texelX = (halfX * 2.0f) / static_cast<float>(mDynamicShadowResolution);
