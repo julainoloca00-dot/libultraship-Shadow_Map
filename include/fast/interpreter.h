@@ -494,8 +494,8 @@ class Interpreter {
                         mDynamicShadowLightDir[1] + (nextDir[1] - mDynamicShadowLightDir[1]) * blend,
                         mDynamicShadowLightDir[2] + (nextDir[2] - mDynamicShadowLightDir[2]) * blend,
                     };
-                    float filteredLenSq = filtered[0] * filtered[0] + filtered[1] * filtered[1] +
-                                          filtered[2] * filtered[2];
+                    float filteredLenSq =
+                        filtered[0] * filtered[0] + filtered[1] * filtered[1] + filtered[2] * filtered[2];
                     if (filteredLenSq > 1e-8f) {
                         float filteredInvLen = 1.0f / sqrtf(filteredLenSq);
                         mDynamicShadowLightDir[0] = filtered[0] * filteredInvLen;
@@ -703,10 +703,10 @@ class Interpreter {
     std::vector<LoadedVertex> mShadowXform;
     float mToonShadowAlpha = 0.5f;        // core blend strength (set per frame by SetToonShadowParams)
     float mToonShadowMinElevation = 0.6f; // min remapped key height above the floor (bounds shadow length)
-    float mShadowSlabDepth = 40.0f;    // stencil-volume: how far below the feet the slab reaches (ground band)
-    float mShadowSlabRise = 10.0f;     // stencil-volume: how far ABOVE the feet the slab top reaches (uphill)
-    int mShadowEdgeSoftness = 1;       // penumbra rings around the silhouette (0 = hard edge, max 2)
-    bool mShadowShowVolume = false;    // debug: draw the translucent shadow volume (black caps, blue walls)
+    float mShadowSlabDepth = 40.0f;       // stencil-volume: how far below the feet the slab reaches (ground band)
+    float mShadowSlabRise = 10.0f;        // stencil-volume: how far ABOVE the feet the slab top reaches (uphill)
+    int mShadowEdgeSoftness = 1;          // penumbra rings around the silhouette (0 = hard edge, max 2)
+    bool mShadowShowVolume = false;       // debug: draw the translucent shadow volume (black caps, blue walls)
     GfxWindowBackend* mWapi = nullptr;
     GfxRenderingAPI* mRapi = nullptr;
 

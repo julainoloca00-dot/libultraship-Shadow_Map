@@ -1307,12 +1307,9 @@ void Interpreter::GfxSpVertex(size_t n_vertices, size_t dest_index, const F3DVtx
 
         if (mCaptureEnvironmentShadow) {
             float(*shadowMv)[4] = mRsp->modelview_matrix_stack[mRsp->modelview_matrix_stack_size - 1];
-            d->wx = v->ob[0] * shadowMv[0][0] + v->ob[1] * shadowMv[1][0] + v->ob[2] * shadowMv[2][0] +
-                    shadowMv[3][0];
-            d->wy = v->ob[0] * shadowMv[0][1] + v->ob[1] * shadowMv[1][1] + v->ob[2] * shadowMv[2][1] +
-                    shadowMv[3][1];
-            d->wz = v->ob[0] * shadowMv[0][2] + v->ob[1] * shadowMv[1][2] + v->ob[2] * shadowMv[2][2] +
-                    shadowMv[3][2];
+            d->wx = v->ob[0] * shadowMv[0][0] + v->ob[1] * shadowMv[1][0] + v->ob[2] * shadowMv[2][0] + shadowMv[3][0];
+            d->wy = v->ob[0] * shadowMv[0][1] + v->ob[1] * shadowMv[1][1] + v->ob[2] * shadowMv[2][1] + shadowMv[3][1];
+            d->wz = v->ob[0] * shadowMv[0][2] + v->ob[1] * shadowMv[1][2] + v->ob[2] * shadowMv[2][2] + shadowMv[3][2];
         }
 
         x = AdjXForAspectRatio(x);
@@ -1545,16 +1542,14 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     // viewport can still cast into the visible image, so dropping them at the exact screen edge made the
     // shadow blink while rotating the camera. Distance and opacity gates keep this far cheaper than capturing
     // the whole room, and the guard radius lies just outside the shadow-map footprint.
-    if (mCaptureEnvironmentShadow && !mFbActive && !is_rect &&
-        (v1->w > 0.0f || v2->w > 0.0f || v3->w > 0.0f) &&
+    if (mCaptureEnvironmentShadow && !mFbActive && !is_rect && (v1->w > 0.0f || v2->w > 0.0f || v3->w > 0.0f) &&
         mEnvironmentShadowCasterAccum.size() + 9 <= kEnvironmentShadowBudgetFloats) {
         bool shadowDepthTest = (mRsp->geometry_mode & G_ZBUFFER) == G_ZBUFFER;
         bool shadowDepthMask = (mRdp->other_mode_l & Z_UPD) == Z_UPD;
-        bool shadowUseAlpha =
-            ((mRdp->other_mode_l & (3 << 20)) == (G_BL_CLR_MEM << 20) &&
-             (mRdp->other_mode_l & (3 << 16)) == (G_BL_1MA << 16)) ||
-            ((mRdp->other_mode_l & (3 << 22)) == (G_BL_CLR_MEM << 22) &&
-             (mRdp->other_mode_l & (3 << 18)) == (G_BL_1MA << 18));
+        bool shadowUseAlpha = ((mRdp->other_mode_l & (3 << 20)) == (G_BL_CLR_MEM << 20) &&
+                               (mRdp->other_mode_l & (3 << 16)) == (G_BL_1MA << 16)) ||
+                              ((mRdp->other_mode_l & (3 << 22)) == (G_BL_CLR_MEM << 22) &&
+                               (mRdp->other_mode_l & (3 << 18)) == (G_BL_1MA << 18));
         bool shadowTextureEdge = (mRdp->other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
         bool shadowAlphaThreshold = (mRdp->other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_THRESHOLD;
         bool shadowInvisible = (mRdp->other_mode_l & (3 << 24)) == (G_BL_0 << 24) &&
@@ -1573,13 +1568,11 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
         const float anchorDx = centerX - mDynamicShadowAnchor[0];
         const float anchorDy = centerY - mDynamicShadowAnchor[1];
         const float anchorDz = centerZ - mDynamicShadowAnchor[2];
-        const bool insideShadowGuard =
-            anchorDx * anchorDx + anchorDz * anchorDz <= kEnvironmentShadowCaptureRadiusSq &&
-            fabsf(anchorDy) <= 3072.0f;
+        const bool insideShadowGuard = anchorDx * anchorDx + anchorDz * anchorDz <= kEnvironmentShadowCaptureRadiusSq &&
+                                       fabsf(anchorDy) <= 3072.0f;
         const bool opaqueEnvironmentCaster =
             insideShadowGuard && shadowDepthTest && shadowDepthMask && !shadowUseAlpha && !shadowTextureEdge &&
-            !shadowAlphaThreshold && !shadowInvisible && shadowCycleType != G_CYC_COPY &&
-            shadowCycleType != G_CYC_FILL;
+            !shadowAlphaThreshold && !shadowInvisible && shadowCycleType != G_CYC_COPY && shadowCycleType != G_CYC_FILL;
         if (opaqueEnvironmentCaster) {
             for (int si = 0; si < 3; si++) {
                 mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wx);
@@ -1692,11 +1685,10 @@ void Interpreter::GfxSpTri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx
     }
 
     const uint32_t cycleType = mRdp->other_mode_h & (3U << G_MDSFT_CYCLETYPE);
-    const bool opaqueEnvironmentCaster =
-        mCaptureEnvironmentShadow && !mFbActive && !is_rect && depth_test && depth_mask && !use_alpha &&
-        !texture_edge && !alpha_threshold && !invisible && cycleType != G_CYC_COPY && cycleType != G_CYC_FILL;
-    if (opaqueEnvironmentCaster &&
-        mEnvironmentShadowCasterAccum.size() + 9 <= kEnvironmentShadowBudgetFloats) {
+    const bool opaqueEnvironmentCaster = mCaptureEnvironmentShadow && !mFbActive && !is_rect && depth_test &&
+                                         depth_mask && !use_alpha && !texture_edge && !alpha_threshold && !invisible &&
+                                         cycleType != G_CYC_COPY && cycleType != G_CYC_FILL;
+    if (opaqueEnvironmentCaster && mEnvironmentShadowCasterAccum.size() + 9 <= kEnvironmentShadowBudgetFloats) {
         for (int si = 0; si < 3; si++) {
             mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wx);
             mEnvironmentShadowCasterAccum.push_back(v_arr[si]->wy);
@@ -2500,14 +2492,10 @@ void Interpreter::FlushToonShadow() {
     // Keep the buffer bounded. The data is three floats per vertex and is consumed once per frame.
     // Drop newest casters once the budget is full, matching the old volume accumulator's behavior.
     const size_t available =
-        mShadowCasterAccum.size() < kShadowAccumBudgetFloats
-            ? kShadowAccumBudgetFloats - mShadowCasterAccum.size()
-            : 0;
+        mShadowCasterAccum.size() < kShadowAccumBudgetFloats ? kShadowAccumBudgetFloats - mShadowCasterAccum.size() : 0;
     const size_t copyFloats = std::min(mShadowVerts.size(), available - (available % 9));
     if (copyFloats >= 9) {
-        mShadowCasterAccum.insert(mShadowCasterAccum.end(), mShadowVerts.begin(),
-                                  mShadowVerts.begin() + copyFloats);
-
+        mShadowCasterAccum.insert(mShadowCasterAccum.end(), mShadowVerts.begin(), mShadowVerts.begin() + copyFloats);
     }
 
     mShadowVerts.clear();
@@ -2523,10 +2511,9 @@ void Interpreter::RenderShadowVolumes() {
     // then combine this frame's visible environment with the previous frame's accepted actor casters.
     mCaptureEnvironmentShadow = false;
 
-    const size_t available =
-        mEnvironmentShadowCasterAccum.size() < kShadowAccumBudgetFloats
-            ? kShadowAccumBudgetFloats - mEnvironmentShadowCasterAccum.size()
-            : 0;
+    const size_t available = mEnvironmentShadowCasterAccum.size() < kShadowAccumBudgetFloats
+                                 ? kShadowAccumBudgetFloats - mEnvironmentShadowCasterAccum.size()
+                                 : 0;
     const size_t copyFloats = std::min(mShadowCasterAccum.size(), available - (available % 9));
     if (copyFloats >= 9) {
         mEnvironmentShadowCasterAccum.insert(mEnvironmentShadowCasterAccum.end(), mShadowCasterAccum.begin(),
@@ -2538,8 +2525,7 @@ void Interpreter::RenderShadowVolumes() {
     float effectiveCamera[16];
     memcpy(effectiveCamera, &mRsp->P_matrix[0][0], sizeof(effectiveCamera));
     if (!mFbActive && mCurDimensions.width > 0 && mCurDimensions.height > 0) {
-        const float targetAspect = static_cast<float>(mCurDimensions.width) /
-                                   static_cast<float>(mCurDimensions.height);
+        const float targetAspect = static_cast<float>(mCurDimensions.width) / static_cast<float>(mCurDimensions.height);
         const float aspectScale = (4.0f / 3.0f) / targetAspect;
         for (int row = 0; row < 4; row++) {
             effectiveCamera[row * 4] *= aspectScale;
@@ -4444,9 +4430,9 @@ static constexpr UcodeHandler otrHandlers = {
     { OTR_G_SETTOON, { "G_SETTOON", gfx_set_toon_handler_custom } },                // G_SETTOON (0x41)
     { OTR_G_SETTOONKEY, { "G_SETTOONKEY", gfx_set_toon_key_handler_custom } },      // G_SETTOONKEY (0x4a)
     { OTR_G_SETTOONSHADOW,
-      { "G_SETTOONSHADOW", gfx_set_toon_shadow_handler_custom } }, // G_SETTOONSHADOW (0x4b) actor shadow
-    { OTR_G_SETSTENCIL, { "G_SETSTENCIL", gfx_set_stencil_handler_custom } }, // G_SETSTENCIL (0x46)
-    { OTR_G_MOVEMEM_HASH, { "OTR_G_MOVEMEM_HASH", gfx_movemem_handler_otr } },      // OTR_G_MOVEMEM_HASH
+      { "G_SETTOONSHADOW", gfx_set_toon_shadow_handler_custom } },             // G_SETTOONSHADOW (0x4b) actor shadow
+    { OTR_G_SETSTENCIL, { "G_SETSTENCIL", gfx_set_stencil_handler_custom } },  // G_SETSTENCIL (0x46)
+    { OTR_G_MOVEMEM_HASH, { "OTR_G_MOVEMEM_HASH", gfx_movemem_handler_otr } }, // OTR_G_MOVEMEM_HASH
     { OTR_G_LOAD_SHADER, { "G_LOAD_SHADER", gfx_set_shader_custom } },
 };
 
